@@ -6,9 +6,9 @@ const CONFIG_PATHS = {
 };
 
 // ================== TOGGLES ==================
-// Speculative decoding (1B uses the 270M as a draft model for speed).
-// It's experimental and the prime suspect for a previous (ABORT) crash,
-// so it is OFF by default. Flip to true to experiment once things are stable.
+// Speculative decoding: 270M drafts tokens, 1B verifies them in batch.
+// FIXED: correct renamed worker path + post-load validation.
+// If it STILL aborts after this fix, set to false.
 const ENABLE_SPEC_DECODING = true;
 
 // ================== MODELS ==================
@@ -36,9 +36,9 @@ const MODELS = {
     url: "https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_0.gguf",
     n_ctx: 4096,
     threads: 4,
-    cache_k: "q4_0",   // q4_0 reverted — was the other ABORT suspect
+    cache_k: "q4_0",   // per your log this initializes fine on this build
     cache_v: "q4_0",
-    draft: "gemma-270m", // only used when ENABLE_SPEC_DECODING is true
+    draft: "gemma-270m",
   },
 };
 
@@ -56,7 +56,7 @@ const COST_CPU_HOUR = 0.05;
 const COST_KEY = "gemma-270m-wllama-cost-v1";
 const CHAT_KEY = "gemma-270m-wllama-chat-v1";
 
-// ================== ON-PAGE LOG (replaces DevTools on locked Chromebooks) ==================
+// ================== ON-PAGE LOG ==================
 const LOG_KEY = "wllama-log-v1";
 let logEntries = [];
 try { logEntries = JSON.parse(localStorage.getItem(LOG_KEY) || "[]"); } catch {}
@@ -146,7 +146,6 @@ function buildLogUI() {
   });
 }
 
-// capture every uncaught error — this is how we see crashes without DevTools
 window.addEventListener("error", (e) => {
   logLine("window", e.message || "error", `@${e.filename}:${e.lineno}`);
 });
@@ -155,7 +154,6 @@ window.addEventListener("unhandledrejection", (e) => {
   logLine("promise", r instanceof Error ? r.message : String(r));
 });
 
-// wllama's logs routed into the panel too
 function makeLogger() {
   const wrap = (level) => (...args) => {
     logLine("wllama", `[${level}]`, ...args);
@@ -164,7 +162,7 @@ function makeLogger() {
   return { debug: wrap("debug"), log: wrap("log"), warn: wrap("warn"), error: wrap("error") };
 }
 
-// ================== TYPEWRITER (smooth, rAF-based) ==================
+// ================== TYPEWRITER ==================
 let typeEl = null;
 let typeQueue = "";
 let typeFinished = false;
@@ -420,7 +418,7 @@ async function loadCurrentModel() {
         };
         const draftProg = ({ loaded, total }) => {
           setProgress((loaded / total) * 100);
-          setStatus(`Downloading draft model (${draftModel.label})… ${Math.round((loaded / total) * 100)}%`);
+          setStatus(`Downloading draft (${draftModel.label})… ${Math.round((loaded / total) * 100)}%`);
         };
 
         const main = await wllama.modelManager.getModelOrDownload(model.url, { progressCallback: mainProg });
@@ -428,17 +426,38 @@ async function loadCurrentModel() {
 
         const mainBlobs = await main.open();
         const draftBlobs = await draft.open();
-        const draftName = draftBlobs[0]?.name;
-        logLine("app", "Spec decode: loading with draft", draftName);
 
+        // wllama's prepareBlobs() renames every blob in array order to
+        // model-XXXXX-of-XXXXX.gguf inside the worker filesystem.
+        // [main, draft] → model-00001-of-00002.gguf (main), model-00002-of-00002.gguf (draft).
+        // The spec_draft_model path MUST use the renamed path — this was the bug.
         await wllama.loadModel([...mainBlobs, ...draftBlobs], {
           ...loadParams,
-          spec_draft_model: `models/${draftName}`,
+          spec_draft_model: "models/model-00002-of-00002.gguf",
           spec_draft_ngl: 0,
           spec_draft_threads: model.threads,
           spec_draft_threads_batch: model.threads,
         });
-        specActive = true;
+
+        // wllama RESOLVES even when the native load fails (success:false
+        // comes back without throwing) — validate that real metadata loaded.
+        const meta = wllama.getModelMetadata();
+        if (!meta?.hparams?.nVocab) {
+          logLine("app", "Spec-decode load returned empty metadata — falling back to solo mode");
+          try { await wllama.exit?.(); } catch {}
+          wllama = getWllama();
+          await wllama.loadModelFromUrl(model.url, {
+            ...loadParams,
+            progressCallback: ({ loaded, total }) => {
+              setProgress((loaded / total) * 100);
+              setStatus(`Downloading ${model.label}… ${Math.round((loaded / total) * 100)}%`);
+            },
+          });
+          specActive = false;
+        } else {
+          specActive = true;
+          logLine("app", "Spec decode ACTIVE: main + draft loaded");
+        }
       } catch (e) {
         logLine("app", "Speculative decoding setup failed, falling back to solo:", e?.message || e);
         try { await wllama.exit?.(); } catch {}
