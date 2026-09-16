@@ -1,27 +1,35 @@
-# Qwen 2.5 0.5B — Local Chromebook Browser App
+# Qwen 2.5 0.5B — CPU/WASM browser build
 
-Uses the current BrowserAI Flare registry entry `qwen2.5-0.5b-flare`, which is the Qwen2.5-0.5B-Instruct Q4_K_M GGUF.
+This version deliberately does NOT use WebGPU. It uses Transformers.js and the ONNX Community Qwen2.5-0.5B-Instruct model with ONNX Runtime Web/WASM.
 
-## Features
-- WebGPU-first local inference
-- BrowserAI model artifact cache (IndexedDB)
-- Service-worker cache for the small app shell
-- Streaming responses
-- Chat history persisted locally
-- JS heap display when Chromium exposes `performance.memory`
-- Origin storage usage/quota
-- Output token estimates and tok/s
-- Persistent all-time equivalent-spend estimate
+Model repository:
+`onnx-community/Qwen2.5-0.5B-Instruct`
+
+The model repository is explicitly structured for Transformers.js. Its main ONNX model is approximately 1.99 GB, so this CPU build is much larger than the 266 MB WebLLM cache you were using before.
+
+## GitHub Pages
+
+Upload:
+- index.html
+- app.js
+- sw.js
+- manifest.json
+- README.md
+
+Enable GitHub Pages and open the HTTPS URL.
+
+Do not open index.html directly with file://.
+
+## Caching
+
+Transformers.js caches model artifacts in browser storage, and the service worker caches the small application shell.
+
+The model is downloaded once per browser/origin when not already cached.
 
 ## Important
-Open this through GitHub Pages (HTTPS), not `file://`.
 
-The cost display is an estimate only. It uses editable proxy rates in `app.js`:
-`TOKEN_EQUIVALENT_USD_PER_1M = 0.20`
-`GPU_EQUIVALENT_USD_PER_HOUR = 1.00`
+CPU/WASM avoids the Chromebook's WebGPU device-loss failure, but it is expected to be significantly slower than a healthy WebGPU path.
 
-It does not represent the actual cost of a specific AI provider or datacenter.
+The dashboard's cost figures are user-editable estimates, not actual vendor accounting.
 
-Qwen2.5-0.5B-Instruct is an instruction-tuned model. This browser wrapper does not remove its training-time behavioral safeguards.
-
-The model is separate from this repository/app and is fetched by BrowserAI from its model source on first load, then cached by the browser.
+The all-time estimated spend is kept in localStorage.

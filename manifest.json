@@ -1,1 +1,8 @@
-{"name":"Qwen 2.5 0.5B Local","short_name":"Qwen Local","start_url":"./","display":"standalone","background_color":"#111318","theme_color":"#111318"}
+{
+  "name": "Qwen 2.5 0.5B Local CPU",
+  "short_name": "Qwen CPU",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#111318",
+  "theme_color": "#111318"
+}
