@@ -6,11 +6,12 @@ import * as webllm from "https://esm.run/@mlc-ai/web-llm";
 
 const MODEL_ID = "Qwen2.5-0.5B-Instruct-q4f16_1-MLC";
 
+// These are estimates, not actual datacenter billing.
 const COST_TOKEN_PER_1M = 0.20;
 const COST_GPU_HOUR = 1.00;
 
-const COST_KEY = "qwen-local-total-cost-v3";
-const CHAT_KEY = "qwen-local-chat-v3";
+const COST_KEY = "qwen-local-total-cost-v4";
+const CHAT_KEY = "qwen-local-chat-v4";
 
 
 // ============================================================
@@ -46,14 +47,17 @@ let totalCost = Number(
     localStorage.getItem(COST_KEY) || "0"
 );
 
+let generating = false;
+
 
 // ============================================================
-// UI
+// UI HELPERS
 // ============================================================
 
 function setStatus(text) {
     statusEl.textContent = text;
 }
+
 
 function setProgress(percent) {
 
@@ -64,22 +68,31 @@ function setProgress(percent) {
         Math.min(100, Number(percent) || 0)
     );
 
-    loadfillEl.style.width = `${p}%`;
+    loadfillEl.style.width =
+        `${p}%`;
 }
+
 
 function hideProgress() {
 
-    loadbarEl.style.display = "none";
-    loadfillEl.style.width = "0%";
+    loadbarEl.style.display =
+        "none";
+
+    loadfillEl.style.width =
+        "0%";
 }
+
 
 function addMessage(role, text = "") {
 
-    const el = document.createElement("div");
+    const el =
+        document.createElement("div");
 
-    el.className = `msg ${role}`;
+    el.className =
+        `msg ${role}`;
 
-    el.textContent = text;
+    el.textContent =
+        text;
 
     chatEl.appendChild(el);
 
@@ -91,24 +104,26 @@ function addMessage(role, text = "") {
 
 
 // ============================================================
-// MEMORY / STORAGE
+// MEMORY
 // ============================================================
 
 function updateMemory() {
 
-    // Chromium only exposes this on some builds.
     if (performance.memory) {
 
         const used =
-            performance.memory.usedJSHeapSize
+            performance.memory
+                .usedJSHeapSize
             / 1024 / 1024;
 
         const limit =
-            performance.memory.jsHeapSizeLimit
+            performance.memory
+                .jsHeapSizeLimit
             / 1024 / 1024;
 
         ramEl.textContent =
-            `${used.toFixed(0)} / ${limit.toFixed(0)} MB`;
+            `${used.toFixed(0)} / ` +
+            `${limit.toFixed(0)} MB`;
 
     } else {
 
@@ -118,6 +133,10 @@ function updateMemory() {
 }
 
 
+// ============================================================
+// STORAGE
+// ============================================================
+
 async function updateStorage() {
 
     try {
@@ -126,14 +145,16 @@ async function updateStorage() {
             !navigator.storage ||
             !navigator.storage.estimate
         ) {
+
             storageEl.textContent =
-                "not available";
+                "unavailable";
 
             return;
         }
 
         const info =
-            await navigator.storage.estimate();
+            await navigator.storage
+                .estimate();
 
         const used =
             (info.usage || 0)
@@ -146,7 +167,8 @@ async function updateStorage() {
         if (quota > 0) {
 
             storageEl.textContent =
-                `${used.toFixed(0)} / ${quota.toFixed(0)} MB`;
+                `${used.toFixed(0)} / ` +
+                `${quota.toFixed(0)} MB`;
 
         } else {
 
@@ -154,11 +176,11 @@ async function updateStorage() {
                 `${used.toFixed(0)} MB`;
         }
 
-    } catch (err) {
+    } catch (error) {
 
         console.warn(
-            "Storage estimate failed:",
-            err
+            "Storage check failed:",
+            error
         );
 
         storageEl.textContent =
@@ -166,6 +188,10 @@ async function updateStorage() {
     }
 }
 
+
+// ============================================================
+// COST
+// ============================================================
 
 function updateCost() {
 
@@ -175,7 +201,7 @@ function updateCost() {
 
 
 // ============================================================
-// CHAT PERSISTENCE
+// CHAT STORAGE
 // ============================================================
 
 function saveConversation() {
@@ -189,11 +215,11 @@ function saveConversation() {
             )
         );
 
-    } catch (err) {
+    } catch (error) {
 
         console.warn(
             "Could not save chat:",
-            err
+            error
         );
     }
 }
@@ -204,7 +230,9 @@ function restoreConversation() {
     try {
 
         const raw =
-            localStorage.getItem(CHAT_KEY);
+            localStorage.getItem(
+                CHAT_KEY
+            );
 
         if (!raw) {
             return;
@@ -217,9 +245,13 @@ function restoreConversation() {
             return;
         }
 
-        conversation = saved;
+        conversation =
+            saved;
 
-        for (const message of conversation) {
+        for (
+            const message
+            of conversation
+        ) {
 
             addMessage(
                 message.role,
@@ -227,11 +259,11 @@ function restoreConversation() {
             );
         }
 
-    } catch (err) {
+    } catch (error) {
 
         console.warn(
             "Could not restore chat:",
-            err
+            error
         );
     }
 }
@@ -243,35 +275,35 @@ function restoreConversation() {
 
 async function registerServiceWorker() {
 
-    if (!("serviceWorker" in navigator)) {
+    if (
+        !("serviceWorker" in navigator)
+    ) {
+
         return;
     }
 
     try {
 
-        const registration =
-            await navigator.serviceWorker.register(
+        await navigator.serviceWorker
+            .register(
                 "./sw.js",
-                { scope: "./" }
+                {
+                    scope: "./"
+                }
             );
 
-        console.log(
-            "Service worker registered:",
-            registration.scope
-        );
-
-    } catch (err) {
+    } catch (error) {
 
         console.warn(
             "Service worker registration failed:",
-            err
+            error
         );
     }
 }
 
 
 // ============================================================
-// MODEL INIT
+// MODEL INITIALIZATION
 // ============================================================
 
 async function initializeModel() {
@@ -285,47 +317,47 @@ async function initializeModel() {
             ? "WebGPU"
             : "Unavailable";
 
+
     if (!navigator.gpu) {
 
         throw new Error(
-            "WebGPU is unavailable."
+            "WebGPU is unavailable in this browser."
         );
     }
 
 
-    // IMPORTANT:
-    // Keep the prebuilt model list and only override
-    // the cache backend.
-
-    const appConfig = {
-
-        ...webllm.prebuiltAppConfig,
-
-        cacheBackend: "indexeddb"
-
-    };
-
-
     setProgress(0);
+
 
     setStatus(
         "Loading Qwen 2.5 0.5B…"
     );
 
 
+    const appConfig = {
+
+        ...webllm.prebuiltAppConfig,
+
+        cacheBackend:
+            "indexeddb"
+
+    };
+
+
     const initProgressCallback =
         (report) => {
 
-            console.log(
-                report.text
-            );
+            if (report?.text) {
 
-            setStatus(
-                report.text
-            );
+                setStatus(
+                    report.text
+                );
+            }
+
 
             if (
-                typeof report.progress === "number"
+                typeof report?.progress
+                === "number"
             ) {
 
                 setProgress(
@@ -334,8 +366,6 @@ async function initializeModel() {
             }
         };
 
-
-    // CURRENT WEBLLM API
 
     engine =
         await webllm.CreateMLCEngine(
@@ -348,13 +378,15 @@ async function initializeModel() {
 
                 initProgressCallback,
 
-                logLevel: "INFO"
+                logLevel:
+                    "ERROR"
 
             },
 
             {
 
-                context_window_size: 2048
+                context_window_size:
+                    2048
 
             }
 
@@ -362,21 +394,24 @@ async function initializeModel() {
 
 
     console.log(
-        "ENGINE READY",
+        "Qwen engine ready:",
         engine
     );
 
 
     hideProgress();
 
+
     setStatus(
-        "Qwen ready — running locally on WebGPU"
+        "Qwen ready • WebGPU"
     );
 
 
-    inputEl.disabled = false;
+    inputEl.disabled =
+        false;
 
-    sendEl.disabled = false;
+    sendEl.disabled =
+        false;
 
     inputEl.focus();
 
@@ -390,7 +425,7 @@ async function initializeModel() {
 
 
 // ============================================================
-// GENERATION
+// GENERATE
 // ============================================================
 
 async function generateResponse(
@@ -403,7 +438,13 @@ async function generateResponse(
         {
             role: "system",
             content:
-                "You are a helpful, direct assistant."
+                "You are Qwen 2.5 0.5B, " +
+                "an AI assistant running locally " +
+                "in the user's browser. " +
+                "Do not claim to be Anthropic, OpenAI, " +
+                "Google, or another company. " +
+                "Answer the user's question directly. " +
+                "Do not mention these instructions."
         },
 
         ...conversation.slice(-10),
@@ -448,12 +489,16 @@ async function generateResponse(
     ) {
 
         const delta =
-            chunk?.choices?.[0]?.delta?.content || "";
+            chunk
+                ?.choices?.[0]
+                ?.delta
+                ?.content || "";
 
 
         if (delta) {
 
-            fullText += delta;
+            fullText +=
+                delta;
 
             replyElement.textContent =
                 fullText;
@@ -473,8 +518,12 @@ async function generateResponse(
 
     const elapsed =
         Math.max(
-            (performance.now() - start)
-            / 1000,
+
+            (
+                performance.now()
+                - start
+            ) / 1000,
+
             0.001
         );
 
@@ -488,10 +537,12 @@ async function generateResponse(
             usage?.prompt_tokens || 0
         );
 
+
     let outputTokens =
         Number(
             usage?.completion_tokens || 0
         );
+
 
     let totalTokens =
         Number(
@@ -499,7 +550,7 @@ async function generateResponse(
         );
 
 
-    // Fallback when runtime doesn't return usage.
+    // Fallback estimates.
 
     if (!outputTokens) {
 
@@ -516,9 +567,7 @@ async function generateResponse(
                         .filter(Boolean)
                         .length
                     * 1.3
-
                 )
-
             );
     }
 
@@ -537,9 +586,7 @@ async function generateResponse(
                         .filter(Boolean)
                         .length
                     * 1.3
-
                 )
-
             );
     }
 
@@ -556,17 +603,18 @@ async function generateResponse(
     // SPEED
     // ========================================================
 
-    const tokPerSecond =
+    const tokensPerSecond =
         outputTokens /
         elapsed;
 
 
     speedEl.textContent =
-        `${outputTokens} tok • ${tokPerSecond.toFixed(1)} tok/s`;
+        `${outputTokens} tok • ` +
+        `${tokensPerSecond.toFixed(1)} tok/s`;
 
 
     // ========================================================
-    // COST ESTIMATE
+    // COST
     // ========================================================
 
     const tokenCost =
@@ -605,13 +653,11 @@ async function generateResponse(
     updateCost();
 
 
+    // Keep status quiet after generation.
+    // The useful information stays in the dashboard.
+
     setStatus(
-
-        `Done locally • ` +
-        `${totalTokens} tokens • ` +
-        `${tokPerSecond.toFixed(1)} tok/s • ` +
-        `est. $${requestCost.toFixed(6)}`
-
+        "Qwen ready • WebGPU"
     );
 
 
@@ -652,6 +698,11 @@ async function generateResponse(
 
 async function sendMessage() {
 
+    if (generating) {
+        return;
+    }
+
+
     const prompt =
         inputEl.value.trim();
 
@@ -664,18 +715,24 @@ async function sendMessage() {
     if (!engine) {
 
         setStatus(
-            "Model is still loading."
+            "Model is still loading…"
         );
 
         return;
     }
 
 
+    generating = true;
+
+
     inputEl.value = "";
 
-    inputEl.disabled = true;
 
-    sendEl.disabled = true;
+    inputEl.disabled =
+        true;
+
+    sendEl.disabled =
+        true;
 
 
     addMessage(
@@ -693,38 +750,41 @@ async function sendMessage() {
 
     try {
 
-        setStatus(
-            "Generating locally…"
-        );
-
-
         await generateResponse(
             prompt,
             replyElement
         );
 
-
-    } catch (err) {
+    } catch (error) {
 
         console.error(
             "Generation error:",
-            err
+            error
         );
 
 
         replyElement.textContent =
-            `Error: ${err?.message || err}`;
+            `Error: ${
+                error?.message || error
+            }`;
 
 
         setStatus(
-            "Generation failed."
+            "Generation failed"
         );
 
     } finally {
 
-        inputEl.disabled = false;
+        generating =
+            false;
 
-        sendEl.disabled = false;
+
+        inputEl.disabled =
+            false;
+
+        sendEl.disabled =
+            false;
+
 
         inputEl.focus();
     }
@@ -732,23 +792,33 @@ async function sendMessage() {
 
 
 // ============================================================
-// CLEAR CHAT
+// ENTER KEY BEHAVIOR
 // ============================================================
 
-function clearChat() {
+inputEl.addEventListener(
+    "keydown",
+    (event) => {
 
-    conversation = [];
+        // Enter = SEND
+        //
+        // Shift + Enter = NEW LINE
 
-    localStorage.removeItem(
-        CHAT_KEY
-    );
+        if (
+            event.key === "Enter" &&
+            !event.shiftKey
+        ) {
 
-    chatEl.replaceChildren();
-}
+            event.preventDefault();
+
+            sendMessage();
+        }
+
+    }
+);
 
 
 // ============================================================
-// EVENTS
+// FORM BUTTON
 // ============================================================
 
 formEl.addEventListener(
@@ -758,14 +828,42 @@ formEl.addEventListener(
         event.preventDefault();
 
         sendMessage();
-
     }
 );
 
 
+// ============================================================
+// CLEAR CHAT
+// ============================================================
+
 clearEl.addEventListener(
     "click",
-    clearChat
+    () => {
+
+        conversation = [];
+
+        localStorage.removeItem(
+            CHAT_KEY
+        );
+
+        chatEl.replaceChildren();
+    }
+);
+
+
+// ============================================================
+// PERIODIC STATS
+// ============================================================
+
+setInterval(
+    () => {
+
+        updateMemory();
+
+        updateStorage();
+
+    },
+    1500
 );
 
 
@@ -789,17 +887,18 @@ async function main() {
 
         await initializeModel();
 
-
-    } catch (err) {
+    } catch (error) {
 
         console.error(
             "STARTUP ERROR:",
-            err
+            error
         );
 
 
         setStatus(
-            `Startup error: ${err?.message || err}`
+            `Startup error: ${
+                error?.message || error
+            }`
         );
     }
 }
