@@ -146,23 +146,24 @@ function restoreConversation() {
 // ================== MODEL ==================
 async function initializeModel() {
   const isolated = typeof crossOriginIsolated !== "undefined" && crossOriginIsolated;
-  backendEl.textContent = isolated
-    ? `wllama (llama.cpp) • ${THREADS} threads`
-    : "wllama • 1 thread (isolation FAILED — check coi-serviceworker.js!)";
+	backendEl.textContent = isolated
+	  ? `wllama CPU • ${THREADS} threads`
+	  : "wllama CPU • 1 thread (isolation FAILED)";
 
   setStatus("Loading Gemma 3 270M (Q4_0, 242 MB)…");
   setProgress(0);
 
   wllama = new Wllama(CONFIG_PATHS, { logger: LoggerWithoutDebug });
 
-  await wllama.loadModelFromUrl(MODEL_URL, {
-    n_ctx: N_CTX,
-    n_threads: THREADS,
-    progressCallback: ({ loaded, total }) => {
-      setProgress((loaded / total) * 100);
-      setStatus(`Downloading… ${Math.round((loaded / total) * 100)}%`);
-    },
-  });
+	await wllama.loadModelFromUrl(MODEL_URL, {
+	  n_ctx: N_CTX,
+	  n_threads: THREADS,
+	  n_gpu_layers: 0, // ← forces CPU/WASM only, skips WebGPU init entirely
+	  progressCallback: ({ loaded, total }) => {
+		setProgress((loaded / total) * 100);
+		setStatus(`Downloading… ${Math.round((loaded / total) * 100)}%`);
+	  },
+	});
 
   hideProgress();
   setStatus("Ready");
