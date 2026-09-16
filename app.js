@@ -1,8 +1,3 @@
-// DELETE these two lines:
-// import Wllama, LoggerWithoutDebug from "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.6.1/esm/index.js";
-// import WasmFromCDN from "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.6.1/esm/wasm-from-cdn.js";
-
-// USE these instead:
 import { Wllama, LoggerWithoutDebug } from "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.6.1/esm/index.js";
 
 // wasm-from-cdn.js is inlined in the bundle; build the config manually:
@@ -10,57 +5,91 @@ const CONFIG_PATHS = {
   default: "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.6.1/esm/wasm/wllama.wasm",
 };
 
+// ================== MODELS ==================
+const MODELS = {
+  "gemma-270m": {
+    label: "Gemma 3 270M — fast",
+    url: "https://huggingface.co/unsloth/gemma-3-270m-it-GGUF/resolve/main/gemma-3-270m-it-Q4_0.gguf",
+  },
+  "qwen-0.5b": {
+    label: "Qwen2.5 0.5B — balanced",
+    url: "https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_0.gguf",
+  },
+  "gemma-1b": {
+    label: "Gemma 3 1B — smart",
+    url: "https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_0.gguf",
+  },
+};
+const MODEL_CHOICE_KEY = "wllama-model-choice";
+let currentModelKey = localStorage.getItem(MODEL_CHOICE_KEY) || "gemma-1b";
+if (!MODELS[currentModelKey]) currentModelKey = "gemma-1b";
+
 // ================== CONFIG ==================
-const MODEL_URL = "https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_0.gguf";
+let N_PREDICT = 512;       // max tokens per reply — can be raised at runtime by "Continue"
+const THREADS = 4;        // tune: try 2, 4, 6
+const N_CTX = 4096;
 
-const THREADS = 4;        // tune: try 3, 4, 6
-const N_CTX = 2048;
-const N_PREDICT = 256;
-
-const TYPE_MS = 30;       // ms per character — lower = faster typing feel
+const TYPE_BASE_CPS = 28;  // baseline typing speed, chars/sec
 
 const COST_TOKEN_PER_1M = 0.20;
 const COST_CPU_HOUR = 0.05;
 const COST_KEY = "gemma-270m-wllama-cost-v1";
 const CHAT_KEY = "gemma-270m-wllama-chat-v1";
 
-// ================== TYPEWRITER ==================
-// Letters appear one by one. The model generates at full speed in the
-// background; this loop just paces the *display*. If the model outpaces
-// the animation, it speeds up to catch up, so it never lags behind.
+// ================== TYPEWRITER (smooth, rAF-based) ==================
 let typeEl = null;
 let typeQueue = "";
-let typeTimer = null;
 let typeFinished = false;
+let typeRaf = null;
+let typeLastTs = 0;
+let typeSpeed = TYPE_BASE_CPS;   // chars/sec, smoothly interpolated
+let typeAccum = 0;
 let drainResolve = null;
 
 function startTyping(el) {
-  finishTyping(); // reset any previous state
+  finishTyping();
   typeEl = el;
   typeQueue = "";
   typeFinished = false;
+  typeSpeed = TYPE_BASE_CPS;
+  typeAccum = 0;
   el.classList.add("typing");
-  typeTimer = setInterval(typeTick, TYPE_MS);
+  typeLastTs = performance.now();
+  typeRaf = requestAnimationFrame(typeFrame);
 }
 
-function typeTick() {
+function typeFrame(ts) {
   if (!typeEl) return;
-  if (!typeQueue.length) {
-    if (typeFinished) finishTyping(); // all shown, generation done
-    return;
+  const dt = Math.min((ts - typeLastTs) / 1000, 0.1); // clamp tab-switch jumps
+  typeLastTs = ts;
+
+  // target speed: readable when idle-ish, speeds up with backlog,
+  // drains fast-but-visibly once generation has ended
+  let target;
+  if (typeFinished) target = Math.max(80, typeQueue.length * 2);
+  else if (typeQueue.length > 80) target = typeQueue.length * 0.9; // track the generator
+  else if (typeQueue.length > 30) target = 55;
+  else target = TYPE_BASE_CPS;
+
+  // smooth acceleration/deceleration instead of discrete jumps
+  typeSpeed += (target - typeSpeed) * Math.min(1, dt * 4);
+
+  typeAccum += typeSpeed * dt;
+  const n = Math.floor(typeAccum);
+  if (n > 0 && typeQueue.length) {
+    const take = Math.min(n, typeQueue.length);
+    typeEl.textContent += typeQueue.slice(0, take);
+    typeQueue = typeQueue.slice(take);
+    typeAccum -= take;
+    chatEl.scrollTop = chatEl.scrollHeight;
   }
-  // adaptive speed: 1 char/tick normally, more when there's a backlog
-  let chars = 1;
-  if (typeFinished) chars = 4;               // drain fast after generation ends
-  else if (typeQueue.length > 40) chars = 3; // catching up
-  else if (typeQueue.length > 15) chars = 2;
-  typeEl.textContent += typeQueue.slice(0, chars);
-  typeQueue = typeQueue.slice(chars);
-  chatEl.scrollTop = chatEl.scrollHeight;
+
+  if (typeFinished && !typeQueue.length) { finishTyping(); return; }
+  typeRaf = requestAnimationFrame(typeFrame);
 }
 
 function finishTyping() {
-  if (typeTimer) { clearInterval(typeTimer); typeTimer = null; }
+  if (typeRaf) { cancelAnimationFrame(typeRaf); typeRaf = null; }
   if (typeEl) { typeEl.classList.remove("typing"); typeEl = null; }
   if (drainResolve) { drainResolve(); drainResolve = null; }
 }
@@ -68,11 +97,10 @@ function finishTyping() {
 // resolves when generation is done AND all letters have been displayed
 function typeFinish() {
   typeFinished = true;
-  if (!typeTimer) return Promise.resolve(); // nothing running
+  if (!typeRaf) return Promise.resolve();
   return new Promise((resolve) => { drainResolve = resolve; });
 }
 
-// hard stop (errors / clear button): drop pending text instantly
 function abortTyping() {
   typeQueue = "";
   typeFinished = true;
@@ -89,7 +117,76 @@ const formEl = $("form"), inputEl = $("input"), sendEl = $("send"), clearEl = $(
 let wllama = null;
 let conversation = [];
 let generating = false;
+let lastPrompt = "";
 let totalCost = Number(localStorage.getItem(COST_KEY) || "0");
+
+// shared cache/model managers so switching models doesn't re-download
+let sharedCacheManager = null;
+let sharedModelManager = null;
+
+function getWllama() {
+  if (!sharedCacheManager) {
+    const first = new Wllama(CONFIG_PATHS, { logger: LoggerWithoutDebug });
+    sharedCacheManager = first.cacheManager;
+    sharedModelManager = first.modelManager;
+    return first;
+  }
+  return new Wllama(CONFIG_PATHS, {
+    logger: LoggerWithoutDebug,
+    cacheManager: sharedCacheManager,
+    modelManager: sharedModelManager,
+  });
+}
+
+// ================== MODEL SELECTOR (built dynamically, no HTML edit needed) ==================
+const modelSelect = document.createElement("select");
+modelSelect.id = "modelSelect";
+modelSelect.title = "Switch model";
+modelSelect.style.cssText =
+  "background:#111318;color:#e6e6e6;border:1px solid #333a47;" +
+  "border-radius:6px;padding:2px 6px;font:inherit;font-size:12px;";
+for (const [key, m] of Object.entries(MODELS)) {
+  const opt = document.createElement("option");
+  opt.value = key;
+  opt.textContent = m.label;
+  modelSelect.appendChild(opt);
+}
+modelSelect.value = currentModelKey;
+statusEl.parentNode.appendChild(modelSelect);
+
+modelSelect.addEventListener("change", () => {
+  const key = modelSelect.value;
+  if (generating || key === currentModelKey) {
+    modelSelect.value = currentModelKey;
+    return;
+  }
+  switchModel(key);
+});
+
+function updateModelHeading() {
+  const label = MODELS[currentModelKey].label.split(" — ")[0];
+  const h1 = document.querySelector("h1");
+  if (h1) h1.textContent = `${label} — Local Browser AI`;
+  document.title = `${label} — Local`;
+}
+
+async function switchModel(key) {
+  currentModelKey = key;
+  localStorage.setItem(MODEL_CHOICE_KEY, key);
+  updateModelHeading();
+  inputEl.disabled = true;
+  sendEl.disabled = true;
+  try {
+    setStatus("Switching model…");
+    setProgress(0);
+    try { await wllama?.exit?.(); } catch (e) { console.warn("exit failed:", e); }
+    wllama = null;
+    await loadCurrentModel();
+  } catch (error) {
+    console.error("Model switch failed:", error);
+    setStatus(`Switch failed: ${error?.message || error}`);
+  }
+}
 
 // ================== UI ==================
 function setStatus(text) { statusEl.textContent = text; }
@@ -142,27 +239,34 @@ function restoreConversation() {
   } catch (e) { console.warn("Could not restore chat:", e); }
 }
 
-// ================== MODEL ==================
-async function initializeModel() {
+// ================== MODEL LOADING ==================
+async function loadCurrentModel() {
+  const model = MODELS[currentModelKey];
   const isolated = typeof crossOriginIsolated !== "undefined" && crossOriginIsolated;
-	backendEl.textContent = isolated
-	  ? `wllama CPU • ${THREADS} threads`
-	  : "wllama CPU • 1 thread (isolation FAILED)";
+  backendEl.textContent = isolated
+    ? `wllama CPU • ${THREADS} threads`
+    : "wllama CPU • 1 thread (isolation FAILED)";
 
-  setStatus("Loading Gemma 3 270M (Q4_0, 242 MB)…");
+  setStatus(`Loading ${model.label}…`);
   setProgress(0);
 
-  wllama = new Wllama(CONFIG_PATHS, { logger: LoggerWithoutDebug });
+  wllama = getWllama();
 
-	await wllama.loadModelFromUrl(MODEL_URL, {
-	  n_ctx: N_CTX,
-	  n_threads: THREADS,
-	  n_gpu_layers: 0, // ← forces CPU/WASM only, skips WebGPU init entirely
-	  progressCallback: ({ loaded, total }) => {
-		setProgress((loaded / total) * 100);
-		setStatus(`Downloading… ${Math.round((loaded / total) * 100)}%`);
-	  },
-	});
+  await wllama.loadModelFromUrl(model.url, {
+    n_ctx: N_CTX,
+    n_threads: THREADS,
+    n_gpu_layers: 0,        // CPU/WASM only — skips WebGPU init entirely
+    n_batch: 2048,          // prefill batching
+    n_ubatch: 512,
+    flash_attn: true,       // faster attention; required for quantized KV cache
+    cache_type_k: "q8_0",   // halves KV memory
+    cache_type_v: "q8_0",
+    ctx_shift: true,        // drop oldest tokens when context fills instead of erroring
+    progressCallback: ({ loaded, total }) => {
+      setProgress((loaded / total) * 100);
+      setStatus(`Downloading ${model.label}… ${Math.round((loaded / total) * 100)}%`);
+    },
+  });
 
   hideProgress();
   setStatus("Ready");
@@ -184,10 +288,11 @@ async function generateResponse(prompt, replyElement) {
 
   const started = performance.now();
   let firstTokenAt = null, lastTokenAt = null, generatedText = "";
+  let finishReason = null;
 
   startTyping(replyElement);
 
-  await wllama.createChatCompletion({
+  const result = await wllama.createChatCompletion({
     messages,
     max_tokens: N_PREDICT,
     temperature: 1.0,
@@ -200,9 +305,20 @@ async function generateResponse(prompt, replyElement) {
       lastTokenAt = now;
       const piece = chunk.choices?.[0]?.delta?.content ?? "";
       generatedText += piece;
-      typeQueue += piece; // animation loop picks it up
+      typeQueue += piece;
+      if (chunk.choices?.[0]?.finish_reason) {
+        finishReason = chunk.choices[0].finish_reason;
+      }
     },
   });
+
+  if (!finishReason && result?.choices?.[0]?.finish_reason) {
+    finishReason = result.choices[0].finish_reason;
+  }
+
+  const completionTokens = result?.usage?.completion_tokens;
+  const truncated = finishReason === "length" ||
+    (Number.isFinite(completionTokens) && completionTokens >= N_PREDICT);
 
   await typeFinish(); // let the remaining letters finish appearing
 
@@ -211,13 +327,14 @@ async function generateResponse(prompt, replyElement) {
   const prefillSeconds = Math.max((firstAt - started) / 1000, 0.001);
   const genSeconds = Math.max((lastAt - firstAt) / 1000, 0.001);
 
-  // NOTE: speed is measured from real token arrival times, so the
-  // typewriter animation never pollutes the tok/s number
-  const outputTokens = Math.max(1, Math.round(generatedText.length / 4));
+  const outputTokens = (Number.isFinite(completionTokens) && completionTokens > 0)
+    ? completionTokens
+    : Math.max(1, Math.round(generatedText.length / 4));
   const tokensPerSecond = outputTokens / genSeconds;
 
+  const truncNote = truncated ? " • TRUNCATED" : "";
   speedEl.textContent =
-    `${outputTokens} tok • ${tokensPerSecond.toFixed(1)} tok/s • prefill ${prefillSeconds.toFixed(1)}s`;
+    `${outputTokens} tok • ${tokensPerSecond.toFixed(1)} tok/s • prefill ${prefillSeconds.toFixed(1)}s${truncNote}`;
 
   const requestCost =
     (outputTokens / 1_000_000) * COST_TOKEN_PER_1M +
@@ -231,8 +348,66 @@ async function generateResponse(prompt, replyElement) {
     { role: "assistant", content: generatedText },
   );
   saveConversation();
+
+  // ---- "response cut off" continuation offer ----
+  if (truncated) {
+    const nextLimit = Math.min(N_PREDICT * 2, 2048);
+    const notice = document.createElement("div");
+    notice.style.cssText =
+      "align-self:flex-start;display:flex;gap:10px;align-items:center;" +
+      "font-size:12px;color:#f0b45f;margin-top:-4px;";
+    const span = document.createElement("span");
+    span.textContent = `Cut off at ${N_PREDICT} tokens`;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = `Continue with limit ${nextLimit}`;
+    btn.style.cssText =
+      "background:#333a47;color:#e6e6e6;border:none;border-radius:8px;" +
+      "padding:4px 10px;font:inherit;font-size:12px;cursor:pointer;";
+    btn.addEventListener("click", () => continueLast(nextLimit, replyElement, notice));
+    notice.append(span, btn);
+    chatEl.appendChild(notice);
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
   await updateStorage();
   updateMemory();
+}
+
+// Re-generates the last exchange with a higher max_tokens.
+// NOTE: this re-pays prefill (the essay gets reprocessed) — that's the
+// cost of the simple approach; it always works and keeps the chat clean.
+async function continueLast(newLimit, replyElement, noticeEl) {
+  if (generating || !wllama) return;
+  generating = true;
+  noticeEl?.remove();
+  N_PREDICT = newLimit;
+  inputEl.disabled = true;
+  sendEl.disabled = true;
+
+  // drop the truncated assistant reply + the user turn that produced it,
+  // so generateResponse re-adds them cleanly
+  if (conversation.at(-1)?.role === "assistant") conversation.pop();
+  if (conversation.at(-1)?.role === "user" && conversation.at(-1).content === lastPrompt) {
+    conversation.pop();
+  }
+  replyElement.textContent = "";
+
+  try {
+    setStatus("Regenerating with higher limit…");
+    await generateResponse(lastPrompt, replyElement);
+    setStatus("Ready");
+  } catch (error) {
+    console.error("Continue error:", error);
+    abortTyping();
+    replyElement.textContent = `Error: ${error?.message || error}`;
+    setStatus("Continue failed");
+  } finally {
+    generating = false;
+    inputEl.disabled = false;
+    sendEl.disabled = false;
+    inputEl.focus();
+  }
 }
 
 // ================== SEND ==================
@@ -242,6 +417,7 @@ async function sendMessage() {
   if (!prompt) return;
   if (!wllama) { setStatus("Model is still loading…"); return; }
   generating = true;
+  lastPrompt = prompt;
   inputEl.value = "";
   inputEl.disabled = true;
   sendEl.disabled = true;
@@ -253,7 +429,7 @@ async function sendMessage() {
     setStatus("Ready");
   } catch (error) {
     console.error("Generation error:", error);
-    abortTyping(); // stop animation before overwriting with the error
+    abortTyping();
     replyElement.textContent = `Error: ${error?.message || error}`;
     setStatus("Generation failed");
   } finally {
@@ -281,10 +457,11 @@ setInterval(() => { updateMemory(); updateStorage(); }, 1500);
 (async () => {
   try {
     restoreConversation();
+    updateModelHeading();
     updateCost();
     updateMemory();
     await updateStorage();
-    await initializeModel();
+    await loadCurrentModel();
   } catch (error) {
     console.error("STARTUP ERROR:", error);
     setStatus(`Startup error: ${error?.message || error}`);
