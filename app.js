@@ -5,37 +5,40 @@ const CONFIG_PATHS = {
   default: "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.6.1/esm/wasm/wllama.wasm",
 };
 
+// ================== TOGGLES ==================
+// Speculative decoding (1B uses the 270M as a draft model for speed).
+// It's experimental and the prime suspect for a previous (ABORT) crash,
+// so it is OFF by default. Flip to true to experiment once things are stable.
+const ENABLE_SPEC_DECODING = false;
+
 // ================== MODELS ==================
-// Per-model tuning. "draft" = key of another model used for speculative
-// decoding (the draft model MUST share the main model's tokenizer, which
-// is why only Gemma→Gemma works here — Qwen has no smaller sibling).
 const MODELS = {
   "gemma-270m": {
     label: "Gemma 3 270M — fast",
     url: "https://huggingface.co/unsloth/gemma-3-270m-it-GGUF/resolve/main/gemma-3-270m-it-Q4_0.gguf",
-    n_ctx: 2048,       // quick tasks don't need more
+    n_ctx: 2048,
     threads: 4,
     cache_k: "q8_0",
     cache_v: "q8_0",
-    draft: null,      // already 10+ t/s, leave it alone
+    draft: null,
   },
   "qwen-0.5b": {
     label: "Qwen2.5 0.5B — balanced",
     url: "https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_0.gguf",
     n_ctx: 4096,
-    threads: 4,       // try 2 if prefill feels slow
+    threads: 4,
     cache_k: "q8_0",
     cache_v: "q8_0",
-    draft: null,      // no same-tokenizer Qwen draft exists
+    draft: null,
   },
   "gemma-1b": {
     label: "Gemma 3 1B — smart",
     url: "https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_0.gguf",
     n_ctx: 4096,
-    threads: 4,       // try 2 — big.LITTLE sometimes prefers fewer
-    cache_k: "q4_0",  // aggressive KV quant = more context headroom;
-    cache_v: "q4_0",  // revert both to "q8_0" if output quality degrades
-    draft: "gemma-270m", // 270M proposes tokens, 1B verifies in batch → faster decode
+    threads: 2,
+    cache_k: "q8_0",   // q4_0 reverted — was the other ABORT suspect
+    cache_v: "q8_0",
+    draft: "gemma-270m", // only used when ENABLE_SPEC_DECODING is true
   },
 };
 
@@ -44,14 +47,122 @@ let currentModelKey = localStorage.getItem(MODEL_CHOICE_KEY) || "gemma-1b";
 if (!MODELS[currentModelKey]) currentModelKey = "gemma-1b";
 
 // ================== CONFIG ==================
-let N_PREDICT = 512;       // max tokens per reply — raised at runtime by "Continue"
+let N_PREDICT = 512;
 
-const TYPE_BASE_CPS = 28;  // baseline typing speed, chars/sec
+const TYPE_BASE_CPS = 28;
 
 const COST_TOKEN_PER_1M = 0.20;
 const COST_CPU_HOUR = 0.05;
 const COST_KEY = "gemma-270m-wllama-cost-v1";
 const CHAT_KEY = "gemma-270m-wllama-chat-v1";
+
+// ================== ON-PAGE LOG (replaces DevTools on locked Chromebooks) ==================
+const LOG_KEY = "wllama-log-v1";
+let logEntries = [];
+try { logEntries = JSON.parse(localStorage.getItem(LOG_KEY) || "[]"); } catch {}
+if (!Array.isArray(logEntries)) logEntries = [];
+
+let logPanelEl = null, logListEl = null, logSaveTimer = null;
+
+function fmtLogTime(t) {
+  return new Date(t).toTimeString().slice(0, 8);
+}
+
+function logLine(tag, ...args) {
+  const msg = args.map((a) => {
+    if (a instanceof Error) {
+      return a.message + (a.stack ? " | " + a.stack.split("\n").slice(1, 3).join(" | ") : "");
+    }
+    if (typeof a === "object") { try { return JSON.stringify(a); } catch { return String(a); } }
+    return String(a);
+  }).join(" ");
+  const entry = { t: Date.now(), tag, msg };
+  logEntries.push(entry);
+  if (logEntries.length > 200) logEntries = logEntries.slice(-200);
+  if (logListEl) appendLogDom(entry);
+  clearTimeout(logSaveTimer);
+  logSaveTimer = setTimeout(() => {
+    try { localStorage.setItem(LOG_KEY, JSON.stringify(logEntries.slice(-200))); } catch {}
+  }, 500);
+}
+
+function appendLogDom(entry) {
+  const div = document.createElement("div");
+  div.textContent = `[${fmtLogTime(entry.t)}] ${entry.tag}: ${entry.msg}`;
+  logListEl.appendChild(div);
+  while (logListEl.children.length > 200) logListEl.firstChild.remove();
+  logListEl.scrollTop = logListEl.scrollHeight;
+}
+
+function buildLogUI() {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = "Logs";
+  btn.title = "Show on-page error log";
+  btn.style.cssText =
+    "background:#333a47;color:#e6e6e6;border:none;border-radius:6px;" +
+    "padding:1px 8px;font:inherit;font-size:12px;cursor:pointer;";
+  statusEl.parentNode.appendChild(btn);
+
+  logPanelEl = document.createElement("div");
+  logPanelEl.style.cssText =
+    "display:none;position:fixed;left:0;right:0;bottom:0;height:45vh;" +
+    "background:rgba(8,10,14,0.97);border-top:1px solid #333a47;" +
+    "z-index:9999;padding:8px 10px;box-sizing:border-box;" +
+    "flex-direction:column;gap:6px;font-family:monospace;";
+  const head = document.createElement("div");
+  head.style.cssText = "display:flex;gap:8px;align-items:center;font-size:12px;color:#9aa3b2;";
+  const title = document.createElement("span");
+  title.textContent = "Log (persists across reloads)";
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.textContent = "Clear";
+  clear.style.cssText = "background:#333a47;color:#e6e6e6;border:none;border-radius:6px;padding:1px 8px;font:inherit;font-size:11px;cursor:pointer;";
+  clear.addEventListener("click", () => {
+    logEntries = [];
+    try { localStorage.removeItem(LOG_KEY); } catch {}
+    logListEl.replaceChildren();
+  });
+  const close = document.createElement("button");
+  close.type = "button";
+  close.textContent = "Close";
+  close.style.cssText = clear.style.cssText;
+  close.addEventListener("click", () => { logPanelEl.style.display = "none"; });
+  head.append(title, clear, close);
+
+  logListEl = document.createElement("div");
+  logListEl.style.cssText =
+    "flex:1;overflow-y:auto;font-size:11px;line-height:1.5;color:#c9d1e0;" +
+    "white-space:pre-wrap;word-break:break-all;";
+  for (const e of logEntries) appendLogDom(e);
+
+  logPanelEl.append(head, logListEl);
+  document.body.appendChild(logPanelEl);
+
+  btn.addEventListener("click", () => {
+    const open = logPanelEl.style.display === "flex";
+    logPanelEl.style.display = open ? "none" : "flex";
+    if (!open) logListEl.scrollTop = logListEl.scrollHeight;
+  });
+}
+
+// capture every uncaught error — this is how we see crashes without DevTools
+window.addEventListener("error", (e) => {
+  logLine("window", e.message || "error", `@${e.filename}:${e.lineno}`);
+});
+window.addEventListener("unhandledrejection", (e) => {
+  const r = e.reason;
+  logLine("promise", r instanceof Error ? r.message : String(r));
+});
+
+// wllama's logs routed into the panel too
+function makeLogger() {
+  const wrap = (level) => (...args) => {
+    logLine("wllama", `[${level}]`, ...args);
+    try { console[level]?.(...args); } catch {}
+  };
+  return { debug: wrap("debug"), log: wrap("log"), warn: wrap("warn"), error: wrap("error") };
+}
 
 // ================== TYPEWRITER (smooth, rAF-based) ==================
 let typeEl = null;
@@ -130,23 +241,23 @@ const formEl = $("form"), inputEl = $("input"), sendEl = $("send"), clearEl = $(
 let wllama = null;
 let conversation = [];
 let generating = false;
-let modelLoading = false;   // guards against the mid-load switch glitch
+let modelLoading = false;
 let lastPrompt = "";
 let totalCost = Number(localStorage.getItem(COST_KEY) || "0");
 
-// shared cache/model managers so switching models never re-downloads
 let sharedCacheManager = null;
 let sharedModelManager = null;
 
 function getWllama() {
+  const cfg = { logger: makeLogger() };
   if (!sharedCacheManager) {
-    const first = new Wllama(CONFIG_PATHS, { logger: LoggerWithoutDebug });
+    const first = new Wllama(CONFIG_PATHS, cfg);
     sharedCacheManager = first.cacheManager;
     sharedModelManager = first.modelManager;
     return first;
   }
   return new Wllama(CONFIG_PATHS, {
-    logger: LoggerWithoutDebug,
+    ...cfg,
     cacheManager: sharedCacheManager,
     modelManager: sharedModelManager,
   });
@@ -171,7 +282,6 @@ statusEl.parentNode.appendChild(modelSelect);
 modelSelect.addEventListener("change", () => {
   const key = modelSelect.value;
   if (key === currentModelKey) return;
-  // THE BUG FIX: no switching while a load or generation is in flight
   if (generating || modelLoading) {
     modelSelect.value = currentModelKey;
     return;
@@ -191,29 +301,30 @@ async function switchModel(key) {
   currentModelKey = key;
   localStorage.setItem(MODEL_CHOICE_KEY, key);
   updateModelHeading();
+  logLine("app", "Switching model to", key);
 
-  // clean up stale UI from the old model
   document.querySelectorAll(".continue-notice").forEach((n) => n.remove());
-  N_PREDICT = 512; // reset any limit raised by "Continue"
+  N_PREDICT = 512;
 
   try {
     setStatus("Switching model…");
     setProgress(0);
-    try { await wllama?.exit?.(); } catch (e) { console.warn("exit failed:", e); }
+    try { await wllama?.exit?.(); } catch (e) { logLine("app", "exit() during switch failed:", e?.message || e); }
     wllama = null;
     await loadCurrentModel();
   } catch (error) {
-    // the new model failed to load — fall back to the previous one
-    console.error("Model switch failed, reverting:", error);
+    logLine("app", "Model switch FAILED:", error?.message || error);
     currentModelKey = prevKey;
     localStorage.setItem(MODEL_CHOICE_KEY, prevKey);
     modelSelect.value = prevKey;
     updateModelHeading();
     try {
       setStatus("Switch failed — reloading previous model…");
+      try { await wllama?.exit?.(); } catch {}
+      wllama = null;
       await loadCurrentModel();
     } catch (e2) {
-      console.error("Revert also failed:", e2);
+      logLine("app", "Revert ALSO failed:", e2?.message || e2);
       setStatus(`Switch failed: ${error?.message || error}`);
     }
   }
@@ -282,6 +393,7 @@ async function loadCurrentModel() {
 
   try {
     const isolated = typeof crossOriginIsolated !== "undefined" && crossOriginIsolated;
+    logLine("app", `Loading model: ${currentModelKey}`, `ctx=${model.n_ctx}`, `threads=${model.threads}`, `spec=${ENABLE_SPEC_DECODING && !!model.draft}`);
 
     setStatus(`Loading ${model.label}…`);
     setProgress(0);
@@ -290,20 +402,18 @@ async function loadCurrentModel() {
     const loadParams = {
       n_ctx: model.n_ctx,
       n_threads: model.threads,
-      n_gpu_layers: 0,       // CPU/WASM only — skips WebGPU init entirely
-      n_batch: 2048,          // prefill batching
+      n_gpu_layers: 0,
+      n_batch: 2048,
       n_ubatch: 512,
-      flash_attn: true,       // faster attention; required for quantized KV cache
+      flash_attn: true,
       cache_type_k: model.cache_k,
       cache_type_v: model.cache_v,
-      ctx_shift: true,        // drop oldest tokens when context fills instead of erroring
+      ctx_shift: true,
     };
 
-    if (model.draft && MODELS[model.draft]) {
-      // ---- speculative decoding: 270M drafts, main model verifies ----
+    if (ENABLE_SPEC_DECODING && model.draft && MODELS[model.draft]) {
       try {
         const draftModel = MODELS[model.draft];
-
         const mainProg = ({ loaded, total }) => {
           setProgress((loaded / total) * 100);
           setStatus(`Downloading ${model.label}… ${Math.round((loaded / total) * 100)}%`);
@@ -313,28 +423,33 @@ async function loadCurrentModel() {
           setStatus(`Downloading draft model (${draftModel.label})… ${Math.round((loaded / total) * 100)}%`);
         };
 
-        // both downloads go through the shared manager → cached after first time
         const main = await wllama.modelManager.getModelOrDownload(model.url, { progressCallback: mainProg });
         const draft = await wllama.modelManager.getModelOrDownload(draftModel.url, { progressCallback: draftProg });
 
         const mainBlobs = await main.open();
         const draftBlobs = await draft.open();
         const draftName = draftBlobs[0]?.name;
+        logLine("app", "Spec decode: loading with draft", draftName);
 
         await wllama.loadModel([...mainBlobs, ...draftBlobs], {
           ...loadParams,
-          spec_draft_model: `models/${draftName}`, // path inside the worker FS
-          spec_draft_ngl: 0,       // draft stays on CPU too
+          spec_draft_model: `models/${draftName}`,
+          spec_draft_ngl: 0,
           spec_draft_threads: model.threads,
           spec_draft_threads_batch: model.threads,
         });
         specActive = true;
       } catch (e) {
-        // speculative setup is experimental — silently fall back to solo mode
-        console.warn("Speculative decoding setup failed, loading without draft:", e);
-        try { await wllama.exit?.(); } catch (e2) { /* ignore */ }
-        wllama = getWllama(); // fresh instance; the failed one may be half-initialized
-        await wllama.loadModelFromUrl(model.url, loadParams);
+        logLine("app", "Speculative decoding setup failed, falling back to solo:", e?.message || e);
+        try { await wllama.exit?.(); } catch {}
+        wllama = getWllama();
+        await wllama.loadModelFromUrl(model.url, {
+          ...loadParams,
+          progressCallback: ({ loaded, total }) => {
+            setProgress((loaded / total) * 100);
+            setStatus(`Downloading ${model.label}… ${Math.round((loaded / total) * 100)}%`);
+          },
+        });
         specActive = false;
       }
     } else {
@@ -352,12 +467,17 @@ async function loadCurrentModel() {
       ? `wllama CPU • ${model.threads} threads`
       : "wllama CPU • 1 thread (isolation FAILED)") + (specActive ? " • +draft" : "");
     setStatus("Ready");
+    logLine("app", "Model ready:", model.label, specActive ? "(with draft)" : "(solo)");
     inputEl.disabled = false;
     sendEl.disabled = false;
     inputEl.focus();
     updateMemory();
     await updateStorage();
     updateCost();
+  } catch (error) {
+    logLine("app", "Model load FAILED:", error?.message || error);
+    setStatus(`Startup error: ${error?.message || error}`);
+    throw error;
   } finally {
     modelLoading = false;
     modelSelect.disabled = false;
@@ -377,6 +497,7 @@ async function generateResponse(prompt, replyElement) {
   let finishReason = null;
 
   startTyping(replyElement);
+  logLine("app", "Generation start:", currentModelKey, `max_tokens=${N_PREDICT}`);
 
   const result = await wllama.createChatCompletion({
     messages,
@@ -422,6 +543,8 @@ async function generateResponse(prompt, replyElement) {
   speedEl.textContent =
     `${outputTokens} tok • ${tokensPerSecond.toFixed(1)} tok/s • prefill ${prefillSeconds.toFixed(1)}s${truncNote}`;
 
+  logLine("app", `Generation done: ${outputTokens} tok, ${tokensPerSecond.toFixed(1)} tok/s, prefill ${prefillSeconds.toFixed(1)}s, finish=${finishReason || "unknown"}`);
+
   const requestCost =
     (outputTokens / 1_000_000) * COST_TOKEN_PER_1M +
     ((prefillSeconds + genSeconds) / 3600) * COST_CPU_HOUR;
@@ -435,7 +558,6 @@ async function generateResponse(prompt, replyElement) {
   );
   saveConversation();
 
-  // ---- "response cut off" continuation offer ----
   if (truncated) {
     const nextLimit = Math.min(N_PREDICT * 2, 2048);
     const notice = document.createElement("div");
@@ -481,7 +603,7 @@ async function continueLast(newLimit, replyElement, noticeEl) {
     await generateResponse(lastPrompt, replyElement);
     setStatus("Ready");
   } catch (error) {
-    console.error("Continue error:", error);
+    logLine("app", "Continue failed:", error?.message || error);
     abortTyping();
     replyElement.textContent = `Error: ${error?.message || error}`;
     setStatus("Continue failed");
@@ -501,7 +623,7 @@ async function sendMessage() {
   if (!prompt) return;
   if (!wllama) { setStatus("Model is still loading…"); return; }
   generating = true;
-  modelSelect.disabled = true; // no model switching mid-generation
+  modelSelect.disabled = true;
   lastPrompt = prompt;
   inputEl.value = "";
   inputEl.disabled = true;
@@ -513,7 +635,7 @@ async function sendMessage() {
     await generateResponse(prompt, replyElement);
     setStatus("Ready");
   } catch (error) {
-    console.error("Generation error:", error);
+    logLine("app", "Generation failed:", error?.message || error);
     abortTyping();
     replyElement.textContent = `Error: ${error?.message || error}`;
     setStatus("Generation failed");
@@ -541,6 +663,8 @@ setInterval(() => { updateMemory(); updateStorage(); }, 1500);
 
 // ================== STARTUP ==================
 (async () => {
+  buildLogUI();
+  logLine("app", "=== App started ===");
   try {
     restoreConversation();
     updateModelHeading();
@@ -549,7 +673,7 @@ setInterval(() => { updateMemory(); updateStorage(); }, 1500);
     await updateStorage();
     await loadCurrentModel();
   } catch (error) {
-    console.error("STARTUP ERROR:", error);
+    logLine("app", "STARTUP ERROR:", error?.message || error);
     setStatus(`Startup error: ${error?.message || error}`);
   }
 })();
