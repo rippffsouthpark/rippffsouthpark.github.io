@@ -1,5 +1,14 @@
+// DELETE these two lines:
+// import Wllama, LoggerWithoutDebug from "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.6.1/esm/index.js";
+// import WasmFromCDN from "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.6.1/esm/wasm-from-cdn.js";
+
+// USE these instead:
 import { Wllama, LoggerWithoutDebug } from "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.6.1/esm/index.js";
-import WasmFromCDN from "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.6.1/esm/wasm-from-cdn.js";
+
+// wasm-from-cdn.js is inlined in the bundle; build the config manually:
+const CONFIG_PATHS = {
+  default: "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.6.1/esm/wasm/wllama.wasm",
+};
 
 // ================== CONFIG ==================
 const MODEL_URL =
@@ -144,7 +153,7 @@ async function initializeModel() {
   setStatus("Loading Gemma 3 270M (Q4_0, 242 MB)…");
   setProgress(0);
 
-  wllama = new Wllama(WasmFromCDN, { logger: LoggerWithoutDebug });
+  wllama = new Wllama(CONFIG_PATHS, { logger: LoggerWithoutDebug });
 
   await wllama.loadModelFromUrl(MODEL_URL, {
     n_ctx: N_CTX,
