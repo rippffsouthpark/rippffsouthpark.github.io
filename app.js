@@ -43,7 +43,7 @@ const CONFIG_PATHS = {
 // Attempt 3 (this): main threads=2 (pool=2), draft threads=1, with a 120s
 // watchdog. If the load hangs, the app auto-disables spec and reloads solo.
 // To re-run the experiment after a watchdog trip: Logs → Clear (resets the flag).
-const ENABLE_SPEC_DECODING = true;
+const ENABLE_SPEC_DECODING = false;
 
 const SPEC_DEADLOCK_KEY = "wllama-spec-deadlock";
 const SPEC_THREADS = 2;        // main threads for the spec attempt (also = pthread pool size)
@@ -75,8 +75,8 @@ const MODELS = {
     url: "https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_0.gguf",
     n_ctx: 4096,
     threads: 4,      // solo-mode threads; spec attempt uses SPEC_THREADS instead
-    cache_k: "q4_0",
-    cache_v: "q4_0",
+    cache_k: "q8_0",
+    cache_v: "q8_0",
     draft: "gemma-270m",
   },
 };
@@ -94,46 +94,72 @@ const COST_CPU_HOUR = 0.05;
 const COST_KEY = "gemma-270m-wllama-cost-v1";
 const CHAT_KEY = "gemma-270m-wllama-chat-v1";
 
-// ================== TYPEWRITER ==================
-const TYPE_BASE_CPS = 40;    // floor: minimum chars/sec (reading speed)
-const TYPE_MAX_CPS = 150;    // cap while generating
-const TYPE_DRAIN_MAX = 200;  // cap when draining after generation ends
+// ================== TYPEWRITER (v3: locked to token speed) ==================
+// Typing speed now DERIVES from the model's live token rate, with only a
+// small read-ahead buffer. When the model generates at 3 t/s, you watch
+// words form at 3 t/s. When it bursts (270M at 10 t/s), typing speeds up
+// proportionally but still letter-by-letter via the hard frame cap.
+const TYPE_LOOKAHEAD_MS = 600;   // how far ahead of the model we may type
+const TYPE_MIN_CPS = 18;         // absolute floor (very slow models)
+const TYPE_MAX_CPS = 90;         // absolute cap (fast bursts stay readable)
+const TYPE_DRAIN_CPS = 120;      // after generation ends, drain remaining
 
 let typeEl = null;
 let typeQueue = "";
 let typeFinished = false;
 let typeRaf = null;
 let typeLastTs = 0;
-let typeSpeed = TYPE_BASE_CPS;
 let typeAccum = 0;
 let drainResolve = null;
-let inRate = 0;
-let lastInTs = 0;
+
+// token-rate tracking
+let tokenRate = 0;        // smoothed tokens/sec (the model's real speed)
+let tokensSeen = 0;
+let rateWindowStart = 0;
 
 function startTyping(el) {
   finishTyping();
   typeEl = el;
   typeQueue = "";
   typeFinished = false;
-  typeSpeed = TYPE_BASE_CPS;
   typeAccum = 0;
-  inRate = 0;
-  lastInTs = 0;
+  tokenRate = 0;
+  tokensSeen = 0;
+  rateWindowStart = performance.now();
   el.classList.add("typing");
   typeLastTs = performance.now();
   typeRaf = requestAnimationFrame(typeFrame);
 }
 
+// called from onData for each token chunk
 function feedTypingRate(piece) {
+  // count tokens: a chunk is ~1 token; if a piece spans multiple, estimate
+  // by pieces since llama.cpp streams one token per chunk
+  tokensSeen += 1;
+
   const now = performance.now();
-  if (lastInTs && piece) {
-    const dt = (now - lastInTs) / 1000;
-    if (dt > 0 && dt < 1) {
-      const inst = piece.length / dt;
-      inRate = inRate ? inRate * 0.75 + inst * 0.25 : inst;
-    }
+  const elapsed = (now - rateWindowStart) / 1000;
+  if (elapsed >= 0.5) {
+    // recompute the smoothed rate every half second
+    const inst = tokensSeen / elapsed;
+    tokenRate = tokenRate ? tokenRate * 0.6 + inst * 0.4 : inst;
+    tokensSeen = 0;
+    rateWindowStart = now;
   }
-  lastInTs = now;
+}
+
+// expected chars/sec for the current measured token rate:
+// a token averages ~4 chars, plus a bit of catch-up headroom
+function targetCPS() {
+  if (typeFinished) {
+    return Math.min(TYPE_DRAIN_CPS, Math.max(60, typeQueue.length / 4));
+  }
+  // chars the model will produce per second, plus allowance to chew
+  // through the look-ahead buffer gradually:
+  const modelCPS = tokenRate * 4;              // token ≈ 4 chars
+  const lookaheadChars = (TYPE_LOOKAHEAD_MS / 1000) * modelCPS;
+  let cps = modelCPS + Math.max(0, typeQueue.length - lookaheadChars) * 0.8;
+  return Math.max(TYPE_MIN_CPS, Math.min(TYPE_MAX_CPS, cps));
 }
 
 function typeFrame(ts) {
@@ -143,28 +169,23 @@ function typeFrame(ts) {
 
   if (!typeQueue.length && !typeFinished) {
     typeAccum = 0;
+    typeRaf = requestAnimationFrame(typeFrame);
+    return;
   }
 
-  let target;
-  if (typeFinished) {
-    target = Math.min(TYPE_DRAIN_MAX, Math.max(90, typeQueue.length / 5));
-  } else {
-    target = Math.min(
-      TYPE_MAX_CPS,
-      TYPE_BASE_CPS + inRate * 0.9 + typeQueue.length * 1.5
-    );
-  }
+  const cps = targetCPS();
+  typeAccum += cps * dt;
 
-  typeSpeed += (target - typeSpeed) * Math.min(1, dt * 6);
-
-  typeAccum += typeSpeed * dt;
-  const n = Math.floor(typeAccum);
-  if (n > 0 && typeQueue.length) {
-    const take = Math.min(n, typeQueue.length);
-    typeEl.textContent += typeQueue.slice(0, take);
-    typeQueue = typeQueue.slice(take);
-    typeAccum -= take;
+  // hard per-frame cap: at most 2 chars/frame keeps it letter-by-letter
+  // even at maximum speed (2 chars * 60fps = 120 > TYPE_MAX_CPS anyway)
+  const n = Math.min(Math.floor(typeAccum), 2, typeQueue.length);
+  if (n > 0) {
+    typeEl.textContent += typeQueue.slice(0, n);
+    typeQueue = typeQueue.slice(n);
+    typeAccum -= n;
     chatEl.scrollTop = chatEl.scrollHeight;
+  } else {
+    typeAccum = Math.max(0, typeAccum); // no negative banking
   }
 
   if (typeFinished && !typeQueue.length) { finishTyping(); return; }
