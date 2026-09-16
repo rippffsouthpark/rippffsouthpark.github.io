@@ -1,6 +1,6 @@
 {
-  "name": "Qwen 2.5 0.5B Local CPU",
-  "short_name": "Qwen CPU",
+  "name": "SmolLM2 360M Local",
+  "short_name": "SmolLM2",
   "start_url": "./",
   "display": "standalone",
   "background_color": "#111318",

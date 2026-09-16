@@ -1,11 +1,24 @@
-# Qwen 2.5 0.5B — CPU/WASM browser build
+# SmolLM2 360M — Chromebook CPU version
 
-This version deliberately does NOT use WebGPU. It uses Transformers.js and the ONNX Community Qwen2.5-0.5B-Instruct model with ONNX Runtime Web/WASM.
+This is the CPU/WASM build for the Chromebook.
 
-Model repository:
-`onnx-community/Qwen2.5-0.5B-Instruct`
+Model:
+onnx-community/SmolLM2-360M-Instruct-ONNX
 
-The model repository is explicitly structured for Transformers.js. Its main ONNX model is approximately 1.99 GB, so this CPU build is much larger than the 266 MB WebLLM cache you were using before.
+Quantization:
+Q4F16
+
+Runtime:
+Transformers.js
+
+The model is loaded with:
+- device: wasm
+- browser cache enabled
+- WASM cache enabled
+
+The model repo currently provides a 272 MB `model_q4f16.onnx` file and a
+Transformers.js usage path. The browser caches model files after the first
+download, so later visits do not need to download them again.
 
 ## GitHub Pages
 
@@ -16,20 +29,27 @@ Upload:
 - manifest.json
 - README.md
 
-Enable GitHub Pages and open the HTTPS URL.
+Enable GitHub Pages and open the HTTPS Pages URL.
 
-Do not open index.html directly with file://.
-
-## Caching
-
-Transformers.js caches model artifacts in browser storage, and the service worker caches the small application shell.
-
-The model is downloaded once per browser/origin when not already cached.
+Do not use `file://`.
 
 ## Important
 
-CPU/WASM avoids the Chromebook's WebGPU device-loss failure, but it is expected to be significantly slower than a healthy WebGPU path.
+This version intentionally uses CPU/WASM because the Chromebook's WebGPU
+path was losing its GPU device during Qwen 0.5B initialization.
 
-The dashboard's cost figures are user-editable estimates, not actual vendor accounting.
+CPU/WASM is slower, but it avoids WebGPU entirely.
 
-The all-time estimated spend is kept in localStorage.
+The app uses a Web Worker only if you later add one; this current build keeps
+the runtime simple and compatible first.
+
+## UI
+
+The dashboard shows:
+- CPU/WASM backend
+- JS heap, when Chromium exposes it
+- browser origin storage usage/quota
+- output tokens and tok/s
+- persistent estimated equivalent spend
+
+The cost numbers are only configurable estimates, not real provider bills.

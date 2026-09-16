@@ -5,9 +5,10 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#111318">
 <link rel="manifest" href="./manifest.json">
-<title>Qwen 2.5 0.5B — Local CPU</title>
+<title>SmolLM2 360M — Local</title>
 <style>
-:root{color-scheme:dark}*{box-sizing:border-box}
+:root{color-scheme:dark}
+*{box-sizing:border-box}
 body{margin:0;background:#111318;color:#eef1f5;font:14px system-ui,-apple-system,Segoe UI,sans-serif;height:100vh;display:flex;flex-direction:column}
 header{padding:14px 16px;border-bottom:1px solid #2a2e37;background:#17191f}
 .title{font-size:17px;font-weight:750}.sub{margin-top:4px;color:#9da5b1;font-size:12px}
@@ -30,28 +31,31 @@ button:disabled{opacity:.45;cursor:default}
 </head>
 <body>
 <header>
-  <div class="title">Qwen 2.5 0.5B — Local CPU AI</div>
+  <div class="title">SmolLM2 360M — Local Browser AI</div>
   <div class="sub" id="status">Starting…</div>
   <div id="loadbar"><div id="loadfill"></div></div>
   <div id="dashboard">
-    <div class="stat">Backend: <b id="backend">CPU / WASM</b></div>
+    <div class="stat">Backend: <b id="backend">WASM/CPU</b></div>
     <div class="stat">JS heap: <b id="ram">—</b></div>
     <div class="stat">Storage: <b id="storage">—</b></div>
     <div class="stat">Last output: <b id="speed">—</b></div>
     <div class="stat">All-time est.: <b id="cost">$0.0000</b></div>
   </div>
 </header>
+
 <main id="chat"></main>
+
 <div class="wrap">
   <div id="tools">
-    <span>CPU/WASM inference • model is cached locally after first download</span>
+    <span>CPU/WASM inference • model cached by browser</span>
     <button class="small" id="clear">Clear chat</button>
   </div>
   <form id="form">
-    <textarea id="input" placeholder="Ask Qwen something…" disabled></textarea>
+    <textarea id="input" placeholder="Ask SmolLM2 something…" disabled></textarea>
     <button id="send" disabled>Send</button>
   </form>
 </div>
-<script type="module" src="./app.js?v=3434"></script>
+
+<script type="module" src="./app.js?v=42422"></script>
 </body>
 </html>
