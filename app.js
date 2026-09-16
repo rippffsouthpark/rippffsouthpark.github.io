@@ -1,38 +1,66 @@
-import * as webllm from "https://esm.run/@mlc-ai/web-llm@0.2.82";
+```js
+import * as webllm from "https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm@0.2.82/+esm";
 
 // ============================================================
 // CONFIG
 // ============================================================
 
-const MODEL_ID = "Qwen2.5-0.5B-Instruct-q4f16_1-MLC";
+const MODEL_ID =
+    "Qwen2.5-0.5B-Instruct-q4f16_1-MLC";
 
-// These are estimates, not actual datacenter billing.
+// These are estimates, NOT actual provider billing.
 const COST_TOKEN_PER_1M = 0.20;
 const COST_GPU_HOUR = 1.00;
 
-const COST_KEY = "qwen-local-total-cost-v4";
-const CHAT_KEY = "qwen-local-chat-v4";
+const COST_KEY =
+    "qwen-local-total-cost-v5";
+
+const CHAT_KEY =
+    "qwen-local-chat-v5";
 
 
 // ============================================================
 // ELEMENTS
 // ============================================================
 
-const statusEl = document.getElementById("status");
-const loadbarEl = document.getElementById("loadbar");
-const loadfillEl = document.getElementById("loadfill");
+const statusEl =
+    document.getElementById("status");
 
-const backendEl = document.getElementById("backend");
-const ramEl = document.getElementById("ram");
-const storageEl = document.getElementById("storage");
-const speedEl = document.getElementById("speed");
-const costEl = document.getElementById("cost");
+const loadbarEl =
+    document.getElementById("loadbar");
 
-const chatEl = document.getElementById("chat");
-const formEl = document.getElementById("form");
-const inputEl = document.getElementById("input");
-const sendEl = document.getElementById("send");
-const clearEl = document.getElementById("clear");
+const loadfillEl =
+    document.getElementById("loadfill");
+
+const backendEl =
+    document.getElementById("backend");
+
+const ramEl =
+    document.getElementById("ram");
+
+const storageEl =
+    document.getElementById("storage");
+
+const speedEl =
+    document.getElementById("speed");
+
+const costEl =
+    document.getElementById("cost");
+
+const chatEl =
+    document.getElementById("chat");
+
+const formEl =
+    document.getElementById("form");
+
+const inputEl =
+    document.getElementById("input");
+
+const sendEl =
+    document.getElementById("send");
+
+const clearEl =
+    document.getElementById("clear");
 
 
 // ============================================================
@@ -43,15 +71,16 @@ let engine = null;
 
 let conversation = [];
 
-let totalCost = Number(
-    localStorage.getItem(COST_KEY) || "0"
-);
-
 let generating = false;
+
+let totalCost =
+    Number(
+        localStorage.getItem(COST_KEY) || "0"
+    );
 
 
 // ============================================================
-// UI HELPERS
+// STATUS / PROGRESS
 // ============================================================
 
 function setStatus(text) {
@@ -61,15 +90,20 @@ function setStatus(text) {
 
 function setProgress(percent) {
 
-    loadbarEl.style.display = "block";
+    loadbarEl.style.display =
+        "block";
 
-    const p = Math.max(
-        0,
-        Math.min(100, Number(percent) || 0)
-    );
+    const value =
+        Math.max(
+            0,
+            Math.min(
+                100,
+                Number(percent) || 0
+            )
+        );
 
     loadfillEl.style.width =
-        `${p}%`;
+        `${value}%`;
 }
 
 
@@ -83,23 +117,32 @@ function hideProgress() {
 }
 
 
-function addMessage(role, text = "") {
+// ============================================================
+// CHAT UI
+// ============================================================
 
-    const el =
+function addMessage(
+    role,
+    text = ""
+) {
+
+    const element =
         document.createElement("div");
 
-    el.className =
+    element.className =
         `msg ${role}`;
 
-    el.textContent =
+    element.textContent =
         text;
 
-    chatEl.appendChild(el);
+    chatEl.appendChild(
+        element
+    );
 
     chatEl.scrollTop =
         chatEl.scrollHeight;
 
-    return el;
+    return element;
 }
 
 
@@ -109,17 +152,26 @@ function addMessage(role, text = "") {
 
 function updateMemory() {
 
-    if (performance.memory) {
+    // Chromium exposes performance.memory
+    // only in certain builds/configurations.
+
+    if (
+        performance.memory
+    ) {
 
         const used =
-            performance.memory
+            performance
+                .memory
                 .usedJSHeapSize
-            / 1024 / 1024;
+            / 1024
+            / 1024;
 
         const limit =
-            performance.memory
+            performance
+                .memory
                 .jsHeapSizeLimit
-            / 1024 / 1024;
+            / 1024
+            / 1024;
 
         ramEl.textContent =
             `${used.toFixed(0)} / ` +
@@ -158,11 +210,13 @@ async function updateStorage() {
 
         const used =
             (info.usage || 0)
-            / 1024 / 1024;
+            / 1024
+            / 1024;
 
         const quota =
             (info.quota || 0)
-            / 1024 / 1024;
+            / 1024
+            / 1024;
 
         if (quota > 0) {
 
@@ -201,7 +255,7 @@ function updateCost() {
 
 
 // ============================================================
-// CHAT STORAGE
+// CHAT PERSISTENCE
 // ============================================================
 
 function saveConversation() {
@@ -218,7 +272,7 @@ function saveConversation() {
     } catch (error) {
 
         console.warn(
-            "Could not save chat:",
+            "Failed to save chat:",
             error
         );
     }
@@ -241,7 +295,10 @@ function restoreConversation() {
         const saved =
             JSON.parse(raw);
 
-        if (!Array.isArray(saved)) {
+        if (
+            !Array.isArray(saved)
+        ) {
+
             return;
         }
 
@@ -262,7 +319,7 @@ function restoreConversation() {
     } catch (error) {
 
         console.warn(
-            "Could not restore chat:",
+            "Failed to restore chat:",
             error
         );
     }
@@ -286,7 +343,7 @@ async function registerServiceWorker() {
 
         await navigator.serviceWorker
             .register(
-                "./sw.js?v=2",
+                "./sw.js?v=3",
                 {
                     scope: "./"
                 }
@@ -308,10 +365,6 @@ async function registerServiceWorker() {
 
 async function initializeModel() {
 
-    setStatus(
-        "Checking WebGPU…"
-    );
-
     backendEl.textContent =
         navigator.gpu
             ? "WebGPU"
@@ -326,12 +379,12 @@ async function initializeModel() {
     }
 
 
-    setProgress(0);
-
-
     setStatus(
         "Loading Qwen 2.5 0.5B…"
     );
+
+
+    setProgress(0);
 
 
     const appConfig = {
@@ -346,6 +399,9 @@ async function initializeModel() {
 
     const initProgressCallback =
         (report) => {
+
+            // Keep startup progress visible,
+            // but do not spam the chat.
 
             if (report?.text) {
 
@@ -394,8 +450,7 @@ async function initializeModel() {
 
 
     console.log(
-        "Qwen engine ready:",
-        engine
+        "Qwen engine ready."
     );
 
 
@@ -403,7 +458,7 @@ async function initializeModel() {
 
 
     setStatus(
-        "Qwen ready • WebGPU"
+        "Ready"
     );
 
 
@@ -425,7 +480,7 @@ async function initializeModel() {
 
 
 // ============================================================
-// GENERATE
+// GENERATION
 // ============================================================
 
 async function generateResponse(
@@ -441,10 +496,12 @@ async function generateResponse(
                 "You are Qwen 2.5 0.5B, " +
                 "an AI assistant running locally " +
                 "in the user's browser. " +
+                "Your name is Qwen. " +
                 "Do not claim to be Anthropic, OpenAI, " +
-                "Google, or another company. " +
-                "Answer the user's question directly. " +
-                "Do not mention these instructions."
+                "Google, Claude, ChatGPT, or another AI/company. " +
+                "Answer the user's question directly and accurately. " +
+                "For math, show the actual calculation and check it. " +
+                "Do not mention system instructions."
         },
 
         ...conversation.slice(-10),
@@ -461,9 +518,11 @@ async function generateResponse(
         performance.now();
 
 
-    let fullText = "";
+    let fullText =
+        "";
 
-    let usage = null;
+    let usage =
+        null;
 
 
     const stream =
@@ -471,28 +530,33 @@ async function generateResponse(
 
             messages,
 
-            temperature: 0.7,
+            temperature:
+                0.7,
 
-            max_tokens: 512,
+            max_tokens:
+                512,
 
-            stream: true,
+            stream:
+                true,
 
             stream_options: {
-                include_usage: true
+                include_usage:
+                    true
             }
 
         });
 
 
     for await (
-        const chunk of stream
+        const chunk
+        of stream
     ) {
 
         const delta =
             chunk
                 ?.choices?.[0]
-                ?.delta
-                ?.content || "";
+                ?.delta?.content
+            || "";
 
 
         if (delta) {
@@ -508,7 +572,9 @@ async function generateResponse(
         }
 
 
-        if (chunk?.usage) {
+        if (
+            chunk?.usage
+        ) {
 
             usage =
                 chunk.usage;
@@ -522,7 +588,8 @@ async function generateResponse(
             (
                 performance.now()
                 - start
-            ) / 1000,
+            )
+            / 1000,
 
             0.001
         );
@@ -550,9 +617,12 @@ async function generateResponse(
         );
 
 
-    // Fallback estimates.
+    // Runtime fallback:
+    // approximate tokens only when usage wasn't returned.
 
-    if (!outputTokens) {
+    if (
+        !outputTokens
+    ) {
 
         outputTokens =
             Math.max(
@@ -572,7 +642,9 @@ async function generateResponse(
     }
 
 
-    if (!inputTokens) {
+    if (
+        !inputTokens
+    ) {
 
         inputTokens =
             Math.max(
@@ -591,7 +663,9 @@ async function generateResponse(
     }
 
 
-    if (!totalTokens) {
+    if (
+        !totalTokens
+    ) {
 
         totalTokens =
             inputTokens +
@@ -653,34 +727,41 @@ async function generateResponse(
     updateCost();
 
 
-    // Keep status quiet after generation.
-    // The useful information stays in the dashboard.
-
-    setStatus(
-        "Qwen ready • WebGPU"
-    );
-
-
     // ========================================================
-    // SAVE CHAT
+    // SAVE CONVERSATION
     // ========================================================
 
     conversation.push(
 
         {
-            role: "user",
-            content: prompt
+            role:
+                "user",
+
+            content:
+                prompt
         },
 
         {
-            role: "assistant",
-            content: fullText
+            role:
+                "assistant",
+
+            content:
+                fullText
         }
 
     );
 
 
     saveConversation();
+
+
+    // ========================================================
+    // QUIET STATUS
+    // ========================================================
+
+    setStatus(
+        "Ready"
+    );
 
 
     updateMemory();
@@ -693,12 +774,15 @@ async function generateResponse(
 
 
 // ============================================================
-// SEND
+// SEND MESSAGE
 // ============================================================
 
 async function sendMessage() {
 
-    if (generating) {
+    if (
+        generating
+    ) {
+
         return;
     }
 
@@ -708,6 +792,7 @@ async function sendMessage() {
 
 
     if (!prompt) {
+
         return;
     }
 
@@ -722,14 +807,17 @@ async function sendMessage() {
     }
 
 
-    generating = true;
+    generating =
+        true;
 
 
-    inputEl.value = "";
+    inputEl.value =
+        "";
 
 
     inputEl.disabled =
         true;
+
 
     sendEl.disabled =
         true;
@@ -750,10 +838,19 @@ async function sendMessage() {
 
     try {
 
+        // Do NOT replace the status with
+        // token/cost text during generation.
+
+        setStatus(
+            "Generating…"
+        );
+
+
         await generateResponse(
             prompt,
             replyElement
         );
+
 
     } catch (error) {
 
@@ -782,6 +879,7 @@ async function sendMessage() {
         inputEl.disabled =
             false;
 
+
         sendEl.disabled =
             false;
 
@@ -792,16 +890,17 @@ async function sendMessage() {
 
 
 // ============================================================
-// ENTER KEY BEHAVIOR
+// ENTER KEY
+// ============================================================
+//
+// Enter       = SEND
+// Shift+Enter = NEW LINE
+//
 // ============================================================
 
 inputEl.addEventListener(
     "keydown",
     (event) => {
-
-        // Enter = SEND
-        //
-        // Shift + Enter = NEW LINE
 
         if (
             event.key === "Enter" &&
@@ -810,15 +909,20 @@ inputEl.addEventListener(
 
             event.preventDefault();
 
+            event.stopPropagation();
+
             sendMessage();
         }
 
+        // Shift+Enter intentionally does
+        // NOTHING here, allowing textarea
+        // to insert a normal newline.
     }
 );
 
 
 // ============================================================
-// FORM BUTTON
+// FORM SUBMIT
 // ============================================================
 
 formEl.addEventListener(
@@ -840,7 +944,8 @@ clearEl.addEventListener(
     "click",
     () => {
 
-        conversation = [];
+        conversation =
+            [];
 
         localStorage.removeItem(
             CHAT_KEY
@@ -852,7 +957,7 @@ clearEl.addEventListener(
 
 
 // ============================================================
-// PERIODIC STATS
+// LIVE STATS
 // ============================================================
 
 setInterval(
@@ -905,3 +1010,4 @@ async function main() {
 
 
 main();
+```
