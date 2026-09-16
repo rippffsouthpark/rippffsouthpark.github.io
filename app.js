@@ -286,7 +286,7 @@ async function registerServiceWorker() {
 
         await navigator.serviceWorker
             .register(
-                "./sw.js",
+                "./sw.js?v=2",
                 {
                     scope: "./"
                 }
