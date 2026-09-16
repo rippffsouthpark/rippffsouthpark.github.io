@@ -19,14 +19,14 @@ const COST_CPU_HOUR =
     0.05;
 
 const COST_KEY =
-    "smollm2-360m-total-cost-v2";
+    "smollm2-360m-total-cost-v3";
 
 const CHAT_KEY =
-    "smollm2-360m-chat-v2";
+    "smollm2-360m-chat-v3";
 
 
 // ============================================================
-// TRANSFORMERS.JS CONFIG
+// TRANSFORMERS.JS
 // ============================================================
 
 env.allowLocalModels =
@@ -112,7 +112,6 @@ let totalCost =
 // ============================================================
 
 function setStatus(text) {
-
     statusEl.textContent =
         text;
 }
@@ -314,7 +313,6 @@ function restoreConversation() {
             );
 
         if (!raw) {
-
             return;
         }
 
@@ -371,9 +369,10 @@ async function registerServiceWorker() {
 
         await navigator.serviceWorker
             .register(
-                "./sw.js?v=4",
+                "./sw.js?v=5",
                 {
-                    scope: "./"
+                    scope:
+                        "./"
                 }
             );
 
@@ -414,15 +413,27 @@ async function initializeModel() {
                 info
             );
 
-            const status =
-                info?.status ||
-                info?.file ||
-                "Loading model…";
 
+            if (
+                info?.status
+            ) {
 
-            setStatus(
-                String(status)
-            );
+                setStatus(
+                    String(
+                        info.status
+                    )
+                );
+
+            } else if (
+                info?.file
+            ) {
+
+                setStatus(
+                    `Loading ${
+                        info.file
+                    }…`
+                );
+            }
 
 
             const progress =
@@ -444,6 +455,21 @@ async function initializeModel() {
         };
 
 
+    // ========================================================
+    // IMPORTANT
+    // ========================================================
+    //
+    // q4 instead of q4f16.
+    //
+    // Your previous q4f16 runtime reached inference but
+    // ONNX Runtime reported:
+    //
+    // Actual: tensor(float16)
+    // Expected: tensor(float)
+    //
+    // q4 avoids that float16 path for this WASM setup.
+    // ========================================================
+
     generator =
         await pipeline(
 
@@ -454,14 +480,13 @@ async function initializeModel() {
             {
 
                 dtype:
-                    "q4f16",
+                    "q4",
 
                 device:
                     "wasm",
 
                 progress_callback:
                     progressCallback
-
             }
 
         );
@@ -486,9 +511,9 @@ async function initializeModel() {
     inputEl.focus();
 
 
-    await updateStorage();
-
     updateMemory();
+
+    await updateStorage();
 
     updateCost();
 }
@@ -503,10 +528,16 @@ function estimateTokens(
 ) {
 
     const words =
-        String(text)
+        String(
+            text
+        )
             .trim()
-            .split(/\s+/)
-            .filter(Boolean)
+            .split(
+                /\s+/
+            )
+            .filter(
+                Boolean
+            )
             .length;
 
 
@@ -539,10 +570,13 @@ async function generateResponse(
                 "a small AI assistant running locally " +
                 "in the user's browser. " +
                 "Do not claim to be another model or company. " +
-                "Answer directly and accurately."
+                "Answer directly and accurately. " +
+                "For calculations, show your work."
         },
 
-        ...conversation.slice(-10),
+        ...conversation.slice(
+            -10
+        ),
 
         {
             role:
@@ -574,7 +608,9 @@ async function generateResponse(
                     true,
 
                 callback_function:
-                    (text) => {
+                    (
+                        text
+                    ) => {
 
                         generatedText +=
                             text;
@@ -585,9 +621,7 @@ async function generateResponse(
                         chatEl.scrollTop =
                             chatEl.scrollHeight;
                     }
-
             }
-
         );
 
 
@@ -607,7 +641,6 @@ async function generateResponse(
                 0.7,
 
             streamer
-
         }
 
     );
@@ -623,9 +656,12 @@ async function generateResponse(
             / 1000,
 
             0.001
-
         );
 
+
+    // ========================================================
+    // TOKENS
+    // ========================================================
 
     const outputTokens =
         estimateTokens(
@@ -647,7 +683,6 @@ async function generateResponse(
                 ),
 
             0
-
         );
 
 
@@ -655,6 +690,10 @@ async function generateResponse(
         inputTokens +
         outputTokens;
 
+
+    // ========================================================
+    // SPEED
+    // ========================================================
 
     const tokensPerSecond =
         outputTokens /
@@ -667,7 +706,7 @@ async function generateResponse(
 
 
     // ========================================================
-    // ESTIMATED EQUIVALENT COST
+    // ESTIMATED COST
     // ========================================================
 
     const tokenCost =
@@ -679,7 +718,7 @@ async function generateResponse(
         COST_TOKEN_PER_1M;
 
 
-    const computeCost =
+    const cpuCost =
         (
             elapsed /
             3600
@@ -690,7 +729,7 @@ async function generateResponse(
 
     const requestCost =
         tokenCost +
-        computeCost;
+        cpuCost;
 
 
     totalCost +=
@@ -699,12 +738,18 @@ async function generateResponse(
 
     localStorage.setItem(
         COST_KEY,
-        String(totalCost)
+        String(
+            totalCost
+        )
     );
 
 
     updateCost();
 
+
+    // ========================================================
+    // SAVE CONVERSATION
+    // ========================================================
 
     conversation.push(
 
@@ -733,14 +778,11 @@ async function generateResponse(
     await updateStorage();
 
     updateMemory();
-
-
-    return generatedText;
 }
 
 
 // ============================================================
-// SEND
+// SEND MESSAGE
 // ============================================================
 
 async function sendMessage() {
@@ -830,14 +872,14 @@ async function sendMessage() {
 
         replyElement.textContent =
             `Error: ${
-                error?.message || error
+                error?.message ||
+                error
             }`;
 
 
         setStatus(
             "Generation failed"
         );
-
 
     } finally {
 
@@ -859,15 +901,13 @@ async function sendMessage() {
 
 
 // ============================================================
-// ENTER KEY
+// ENTER = SEND
+// SHIFT+ENTER = NEW LINE
 // ============================================================
 
 inputEl.addEventListener(
     "keydown",
     (event) => {
-
-        // Enter = send
-        // Shift+Enter = newline
 
         if (
             event.key === "Enter" &&
@@ -966,7 +1006,8 @@ async function main() {
 
         setStatus(
             `Startup error: ${
-                error?.message || error
+                error?.message ||
+                error
             }`
         );
     }
