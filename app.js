@@ -9,7 +9,7 @@ const CONFIG_PATHS = {
 // Speculative decoding (1B uses the 270M as a draft model for speed).
 // It's experimental and the prime suspect for a previous (ABORT) crash,
 // so it is OFF by default. Flip to true to experiment once things are stable.
-const ENABLE_SPEC_DECODING = false;
+const ENABLE_SPEC_DECODING = true;
 
 // ================== MODELS ==================
 const MODELS = {
@@ -35,9 +35,9 @@ const MODELS = {
     label: "Gemma 3 1B — smart",
     url: "https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_0.gguf",
     n_ctx: 4096,
-    threads: 2,
-    cache_k: "q8_0",   // q4_0 reverted — was the other ABORT suspect
-    cache_v: "q8_0",
+    threads: 4,
+    cache_k: "q4_0",   // q4_0 reverted — was the other ABORT suspect
+    cache_v: "q4_0",
     draft: "gemma-270m", // only used when ENABLE_SPEC_DECODING is true
   },
 };
