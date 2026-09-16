@@ -11,8 +11,7 @@ const CONFIG_PATHS = {
 };
 
 // ================== CONFIG ==================
-const MODEL_URL =
-  "https://huggingface.co/unsloth/gemma-3-270m-it-GGUF/resolve/main/gemma-3-270m-it-Q4_0.gguf";
+const MODEL_URL = "https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_0.gguf";
 
 const THREADS = 4;        // tune: try 3, 4, 6
 const N_CTX = 2048;
