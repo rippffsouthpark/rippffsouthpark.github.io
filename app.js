@@ -1,3 +1,34 @@
+// ================== ONE-TIME SERVICE WORKER CLEANUP ==================
+// The old sw.js from the first deployment is still registered in the
+// browser and blocking coi-serviceworker.js from controlling the page.
+// This unregisters ALL service workers and reloads ONCE, so that
+// coi-serviceworker.js can register cleanly and restore multi-threading.
+//
+// If you're seeing "isolation FAILED" even after this fix:
+//   1. Close ALL tabs of this site, open a new one, and try again.
+//   2. If still failing: chrome://serviceworker-internals → find this
+//      site → Unregister. (Or just wait ~24h; SWs expire.)
+(async () => {
+  const CLEANUP_KEY = "sw-cleanup-done";
+  if (typeof crossOriginIsolated !== "undefined" && crossOriginIsolated) return;
+  if (sessionStorage.getItem(CLEANUP_KEY)) return; // already cleaned this session
+
+  sessionStorage.setItem(CLEANUP_KEY, "1");
+
+  if ("serviceWorker" in navigator) {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    const hasMultiple = regs.length > 0;
+    for (const reg of regs) {
+      await reg.unregister();
+    }
+    if (hasMultiple) {
+      // reloaded so coi-serviceworker.js can register fresh
+      location.reload();
+      return; // stop this script from running further on this load
+    }
+  }
+})();
+
 import { Wllama, LoggerWithoutDebug } from "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.6.1/esm/index.js";
 
 // wasm-from-cdn.js is inlined in the bundle; build the config manually:
