@@ -6,10 +6,12 @@ const CONFIG_PATHS = {
 };
 
 // ================== TOGGLES ==================
-// Speculative decoding: 270M drafts tokens, 1B verifies them in batch.
-// FIXED: correct renamed worker path + post-load validation.
-// If it STILL aborts after this fix, set to false.
-const ENABLE_SPEC_DECODING = true;
+// Speculative decoding: DOES NOT WORK on this WASM build. The pthread pool
+// (fixed at 4 workers) cannot host two contexts — the draft context's
+// compute threads deadlock the pool and loading hangs forever. Confirmed
+// via log 17:03:53: draft loads fully, then native code never returns.
+// Do not enable. — final verdict, 2026
+const ENABLE_SPEC_DECODING = false;
 
 // ================== MODELS ==================
 const MODELS = {
@@ -36,9 +38,9 @@ const MODELS = {
     url: "https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_0.gguf",
     n_ctx: 4096,
     threads: 4,
-    cache_k: "q4_0",   // per your log this initializes fine on this build
+    cache_k: "q4_0",
     cache_v: "q4_0",
-    draft: "gemma-270m",
+    draft: "gemma-270m", // unused while ENABLE_SPEC_DECODING is false
   },
 };
 
@@ -387,11 +389,9 @@ async function loadCurrentModel() {
   inputEl.disabled = true;
   sendEl.disabled = true;
 
-  let specActive = false;
-
   try {
     const isolated = typeof crossOriginIsolated !== "undefined" && crossOriginIsolated;
-    logLine("app", `Loading model: ${currentModelKey}`, `ctx=${model.n_ctx}`, `threads=${model.threads}`, `spec=${ENABLE_SPEC_DECODING && !!model.draft}`);
+    logLine("app", `Loading model: ${currentModelKey}`, `ctx=${model.n_ctx}`, `threads=${model.threads}`);
 
     setStatus(`Loading ${model.label}…`);
     setProgress(0);
@@ -400,93 +400,29 @@ async function loadCurrentModel() {
     const loadParams = {
       n_ctx: model.n_ctx,
       n_threads: model.threads,
-      n_gpu_layers: 0,
-      n_batch: 2048,
+      n_gpu_layers: 0,       // CPU/WASM only — skips WebGPU init entirely
+      n_batch: 2048,          // prefill batching
       n_ubatch: 512,
-      flash_attn: true,
+      flash_attn: true,       // faster attention; required for quantized KV cache
       cache_type_k: model.cache_k,
       cache_type_v: model.cache_v,
       ctx_shift: true,
     };
 
-    if (ENABLE_SPEC_DECODING && model.draft && MODELS[model.draft]) {
-      try {
-        const draftModel = MODELS[model.draft];
-        const mainProg = ({ loaded, total }) => {
-          setProgress((loaded / total) * 100);
-          setStatus(`Downloading ${model.label}… ${Math.round((loaded / total) * 100)}%`);
-        };
-        const draftProg = ({ loaded, total }) => {
-          setProgress((loaded / total) * 100);
-          setStatus(`Downloading draft (${draftModel.label})… ${Math.round((loaded / total) * 100)}%`);
-        };
-
-        const main = await wllama.modelManager.getModelOrDownload(model.url, { progressCallback: mainProg });
-        const draft = await wllama.modelManager.getModelOrDownload(draftModel.url, { progressCallback: draftProg });
-
-        const mainBlobs = await main.open();
-        const draftBlobs = await draft.open();
-
-        // wllama's prepareBlobs() renames every blob in array order to
-        // model-XXXXX-of-XXXXX.gguf inside the worker filesystem.
-        // [main, draft] → model-00001-of-00002.gguf (main), model-00002-of-00002.gguf (draft).
-        // The spec_draft_model path MUST use the renamed path — this was the bug.
-        await wllama.loadModel([...mainBlobs, ...draftBlobs], {
-          ...loadParams,
-          spec_draft_model: "models/model-00002-of-00002.gguf",
-          spec_draft_ngl: 0,
-          spec_draft_threads: model.threads,
-          spec_draft_threads_batch: model.threads,
-        });
-
-        // wllama RESOLVES even when the native load fails (success:false
-        // comes back without throwing) — validate that real metadata loaded.
-        const meta = wllama.getModelMetadata();
-        if (!meta?.hparams?.nVocab) {
-          logLine("app", "Spec-decode load returned empty metadata — falling back to solo mode");
-          try { await wllama.exit?.(); } catch {}
-          wllama = getWllama();
-          await wllama.loadModelFromUrl(model.url, {
-            ...loadParams,
-            progressCallback: ({ loaded, total }) => {
-              setProgress((loaded / total) * 100);
-              setStatus(`Downloading ${model.label}… ${Math.round((loaded / total) * 100)}%`);
-            },
-          });
-          specActive = false;
-        } else {
-          specActive = true;
-          logLine("app", "Spec decode ACTIVE: main + draft loaded");
-        }
-      } catch (e) {
-        logLine("app", "Speculative decoding setup failed, falling back to solo:", e?.message || e);
-        try { await wllama.exit?.(); } catch {}
-        wllama = getWllama();
-        await wllama.loadModelFromUrl(model.url, {
-          ...loadParams,
-          progressCallback: ({ loaded, total }) => {
-            setProgress((loaded / total) * 100);
-            setStatus(`Downloading ${model.label}… ${Math.round((loaded / total) * 100)}%`);
-          },
-        });
-        specActive = false;
-      }
-    } else {
-      await wllama.loadModelFromUrl(model.url, {
-        ...loadParams,
-        progressCallback: ({ loaded, total }) => {
-          setProgress((loaded / total) * 100);
-          setStatus(`Downloading ${model.label}… ${Math.round((loaded / total) * 100)}%`);
-        },
-      });
-    }
+    await wllama.loadModelFromUrl(model.url, {
+      ...loadParams,
+      progressCallback: ({ loaded, total }) => {
+        setProgress((loaded / total) * 100);
+        setStatus(`Downloading ${model.label}… ${Math.round((loaded / total) * 100)}%`);
+      },
+    });
 
     hideProgress();
-    backendEl.textContent = (isolated
+    backendEl.textContent = isolated
       ? `wllama CPU • ${model.threads} threads`
-      : "wllama CPU • 1 thread (isolation FAILED)") + (specActive ? " • +draft" : "");
+      : "wllama CPU • 1 thread (isolation FAILED)";
     setStatus("Ready");
-    logLine("app", "Model ready:", model.label, specActive ? "(with draft)" : "(solo)");
+    logLine("app", "Model ready:", model.label);
     inputEl.disabled = false;
     sendEl.disabled = false;
     inputEl.focus();
