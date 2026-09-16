@@ -6,10 +6,18 @@ const CONFIG_PATHS = {
 };
 
 // ================== TOGGLES ==================
-// Speculative decoding: DOES NOT WORK on this WASM build — the fixed 4-worker
-// pthread pool deadlocks when the draft context requests compute threads.
-// Confirmed via log; do not enable.
+// Speculative decoding — guarded experiment.
+// Attempt 1: wrong draft filename (fixed).
+// Attempt 2: threads=4 → pthread pool deadlock, hung at load (your 17:03 log).
+// Attempt 3 (this): main threads=2 (pool=2), draft threads=1, with a 120s
+// watchdog. If the load hangs, the app auto-disables spec and reloads solo.
+// To re-run the experiment after a watchdog trip: Logs → Clear (resets the flag).
 const ENABLE_SPEC_DECODING = true;
+
+const SPEC_DEADLOCK_KEY = "wllama-spec-deadlock";
+const SPEC_THREADS = 2;        // main threads for the spec attempt (also = pthread pool size)
+const SPEC_DRAFT_THREADS = 1;  // draft model threads
+const SPEC_WATCHDOG_MS = 120000;
 
 // ================== MODELS ==================
 const MODELS = {
@@ -35,10 +43,10 @@ const MODELS = {
     label: "Gemma 3 1B — smart",
     url: "https://huggingface.co/unsloth/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_0.gguf",
     n_ctx: 4096,
-    threads: 4,
+    threads: 4,      // solo-mode threads; spec attempt uses SPEC_THREADS instead
     cache_k: "q4_0",
     cache_v: "q4_0",
-    draft: "gemma-270m", // unused while ENABLE_SPEC_DECODING is false
+    draft: "gemma-270m",
   },
 };
 
@@ -47,7 +55,8 @@ let currentModelKey = localStorage.getItem(MODEL_CHOICE_KEY) || "gemma-1b";
 if (!MODELS[currentModelKey]) currentModelKey = "gemma-1b";
 
 // ================== CONFIG ==================
-let N_PREDICT = 512;
+// Max tokens per reply. Ceiling, not target — model stops naturally when done.
+let N_PREDICT = 2048;
 
 const COST_TOKEN_PER_1M = 0.20;
 const COST_CPU_HOUR = 0.05;
@@ -55,12 +64,8 @@ const COST_KEY = "gemma-270m-wllama-cost-v1";
 const CHAT_KEY = "gemma-270m-wllama-chat-v1";
 
 // ================== TYPEWRITER ==================
-// Typing speed tracks the model's LIVE output rate (measured as tokens
-// arrive), so fast models type fast and slow models type at reading pace —
-// but hard caps guarantee it's always visibly character-by-character.
-// Tune these:
 const TYPE_BASE_CPS = 40;    // floor: minimum chars/sec (reading speed)
-const TYPE_MAX_CPS = 150;    // cap while generating (≈2 chars/frame at 60fps)
+const TYPE_MAX_CPS = 150;    // cap while generating
 const TYPE_DRAIN_MAX = 200;  // cap when draining after generation ends
 
 let typeEl = null;
@@ -71,7 +76,7 @@ let typeLastTs = 0;
 let typeSpeed = TYPE_BASE_CPS;
 let typeAccum = 0;
 let drainResolve = null;
-let inRate = 0;      // smoothed live incoming chars/sec from the model
+let inRate = 0;
 let lastInTs = 0;
 
 function startTyping(el) {
@@ -88,7 +93,6 @@ function startTyping(el) {
   typeRaf = requestAnimationFrame(typeFrame);
 }
 
-// call from onData — keeps a smoothed estimate of how fast the model writes
 function feedTypingRate(piece) {
   const now = performance.now();
   if (lastInTs && piece) {
@@ -106,26 +110,20 @@ function typeFrame(ts) {
   const dt = Math.min((ts - typeLastTs) / 1000, 0.1);
   typeLastTs = ts;
 
-  // don't bank speed while there's nothing to type
   if (!typeQueue.length && !typeFinished) {
     typeAccum = 0;
   }
 
   let target;
   if (typeFinished) {
-    // generation done: drain the rest briskly but visibly
-    // (a full essay drains in ~5–10s, never instantly)
     target = Math.min(TYPE_DRAIN_MAX, Math.max(90, typeQueue.length / 5));
   } else {
-    // pace with the model's live rate + gentle catch-up on backlog,
-    // hard-capped so it always looks like typing
     target = Math.min(
       TYPE_MAX_CPS,
       TYPE_BASE_CPS + inRate * 0.9 + typeQueue.length * 1.5
     );
   }
 
-  // smooth acceleration toward the target (no jumps)
   typeSpeed += (target - typeSpeed) * Math.min(1, dt * 6);
 
   typeAccum += typeSpeed * dt;
@@ -168,6 +166,10 @@ if (!Array.isArray(logEntries)) logEntries = [];
 
 let logPanelEl = null, logListEl = null, logSaveTimer = null;
 
+function saveLogNow() {
+  try { localStorage.setItem(LOG_KEY, JSON.stringify(logEntries.slice(-200))); } catch {}
+}
+
 function fmtLogTime(t) {
   return new Date(t).toTimeString().slice(0, 8);
 }
@@ -185,9 +187,7 @@ function logLine(tag, ...args) {
   if (logEntries.length > 200) logEntries = logEntries.slice(-200);
   if (logListEl) appendLogDom(entry);
   clearTimeout(logSaveTimer);
-  logSaveTimer = setTimeout(() => {
-    try { localStorage.setItem(LOG_KEY, JSON.stringify(logEntries.slice(-200))); } catch {}
-  }, 500);
+  logSaveTimer = setTimeout(saveLogNow, 500);
 }
 
 function appendLogDom(entry) {
@@ -225,7 +225,10 @@ function buildLogUI() {
   clear.addEventListener("click", () => {
     logEntries = [];
     try { localStorage.removeItem(LOG_KEY); } catch {}
+    // clearing logs also re-arms the spec experiment
+    try { localStorage.removeItem(SPEC_DEADLOCK_KEY); } catch {}
     logListEl.replaceChildren();
+    logLine("app", "Logs cleared; spec-deadlock flag reset (experiment re-armed)");
   });
   const close = document.createElement("button");
   close.type = "button";
@@ -339,7 +342,7 @@ async function switchModel(key) {
   logLine("app", "Switching model to", key);
 
   document.querySelectorAll(".continue-notice").forEach((n) => n.remove());
-  N_PREDICT = 512;
+  N_PREDICT = 2048;
 
   try {
     setStatus("Switching model…");
@@ -424,39 +427,112 @@ async function loadCurrentModel() {
   inputEl.disabled = true;
   sendEl.disabled = true;
 
+  let specActive = false;
+  const specBlocked = !!localStorage.getItem(SPEC_DEADLOCK_KEY);
+  const wantSpec = ENABLE_SPEC_DECODING && !!model.draft && MODELS[model.draft] && !specBlocked;
+
+  const downloadProgress = (label) => ({ loaded, total }) => {
+    setProgress((loaded / total) * 100);
+    setStatus(`Downloading ${label}… ${Math.round((loaded / total) * 100)}%`);
+  };
+
   try {
     const isolated = typeof crossOriginIsolated !== "undefined" && crossOriginIsolated;
-    logLine("app", `Loading model: ${currentModelKey}`, `ctx=${model.n_ctx}`, `threads=${model.threads}`);
+    logLine("app", `Loading model: ${currentModelKey}`, `ctx=${model.n_ctx}`, `threads=${model.threads}`, `spec=${wantSpec}${specBlocked ? " (deadlock flag set — auto-disabled)" : ""}`);
 
     setStatus(`Loading ${model.label}…`);
     setProgress(0);
     wllama = getWllama();
 
-    await wllama.loadModelFromUrl(model.url, {
-      n_ctx: model.n_ctx,
+    const baseParams = {
       n_gpu_layers: 0,       // CPU/WASM only — skips WebGPU init entirely
       n_batch: 2048,          // prefill batching
       n_ubatch: 512,
-	  n_threads: 2,
-	  spec_draft_model: "models/model-00002-of-00002.gguf",
-	  spec_draft_threads: 1,
-	  spec_draft_threads_batch: 1,
       flash_attn: true,       // faster attention; required for quantized KV cache
       cache_type_k: model.cache_k,
       cache_type_v: model.cache_v,
       ctx_shift: true,
-      progressCallback: ({ loaded, total }) => {
-        setProgress((loaded / total) * 100);
-        setStatus(`Downloading ${model.label}… ${Math.round((loaded / total) * 100)}%`);
-      },
-    });
+    };
+
+    if (wantSpec) {
+      // ---------- SPEC DECODING EXPERIMENT (attempt 3) ----------
+      // Both models are passed as blobs, so the worker FS gets:
+      //   model-00001-of-00002.gguf  (main, loaded automatically)
+      //   model-00002-of-00002.gguf  (draft, referenced by spec_draft_model)
+      // Threads: main 2 (pool=2), draft 1. Watchdog: 120s.
+      try {
+        const draftModel = MODELS[model.draft];
+
+        const main = await wllama.modelManager.getModelOrDownload(
+          model.url, { progressCallback: downloadProgress(model.label) });
+        const draft = await wllama.modelManager.getModelOrDownload(
+          draftModel.url, { progressCallback: downloadProgress(`draft (${draftModel.label})`) });
+
+        const mainBlobs = await main.open();
+        const draftBlobs = await draft.open();
+
+        logLine("app", `Spec experiment: pool=${SPEC_THREADS}, main threads=${SPEC_THREADS}, draft threads=${SPEC_DRAFT_THREADS}. Watchdog: ${SPEC_WATCHDOG_MS / 1000}s.`);
+
+        const loadPromise = wllama.loadModel([...mainBlobs, ...draftBlobs], {
+          ...baseParams,
+          n_ctx: model.n_ctx,
+          n_threads: SPEC_THREADS,  // ALSO sizes the pthread pool for this worker
+          spec_draft_model: "models/model-00002-of-00002.gguf",
+          spec_draft_ngl: 0,
+          spec_draft_threads: SPEC_DRAFT_THREADS,
+          spec_draft_threads_batch: SPEC_DRAFT_THREADS,
+        });
+
+        await Promise.race([
+          loadPromise,
+          new Promise((_, rej) => setTimeout(() => rej(new Error("SPEC_WATCHDOG")), SPEC_WATCHDOG_MS)),
+        ]);
+
+        // wllama resolves even when the native load fails (success:false
+        // without throwing) — validate that real metadata populated.
+        const meta = (() => { try { return wllama.getModelMetadata(); } catch { return null; } })();
+        if (!meta?.hparams?.nVocab) {
+          throw new Error("spec load returned empty metadata");
+        }
+        specActive = true;
+        logLine("app", "SPEC DECODING ACTIVE — main + draft loaded and initialized");
+      } catch (e) {
+        if (String(e?.message || e) === "SPEC_WATCHDOG") {
+          logLine("app", "SPEC WATCHDOG FIRED — load hung past timeout. Verdict: thread-pool deadlock confirmed. Auto-reverting to solo mode and reloading.");
+          try { localStorage.setItem(SPEC_DEADLOCK_KEY, "confirmed"); } catch {}
+          saveLogNow();
+          setStatus("Spec decoding hung — reverting to solo mode. Reloading…");
+          setTimeout(() => location.reload(), 1500);
+          return; // reload handles the rest; skip normal completion below
+        }
+        logLine("app", "Spec setup failed, falling back to solo:", e?.message || e);
+        try { await wllama.exit?.(); } catch {}
+        wllama = getWllama();
+        await wllama.loadModelFromUrl(model.url, {
+          ...baseParams,
+          n_ctx: model.n_ctx,
+          n_threads: model.threads,
+          progressCallback: downloadProgress(model.label),
+        });
+        specActive = false;
+      }
+    } else {
+      await wllama.loadModelFromUrl(model.url, {
+        ...baseParams,
+        n_ctx: model.n_ctx,
+        n_threads: model.threads,
+        progressCallback: downloadProgress(model.label),
+      });
+    }
 
     hideProgress();
-    backendEl.textContent = isolated
-      ? `wllama CPU • ${model.threads} threads`
-      : "wllama CPU • 1 thread (isolation FAILED)";
+    const threadNote = specActive ? `${SPEC_THREADS}+${SPEC_DRAFT_THREADS} threads • +draft` : `${model.threads} threads`;
+    backendEl.textContent = (isolated
+      ? `wllama CPU • ${threadNote}`
+      : "wllama CPU • 1 thread (isolation FAILED)")
+      + (specBlocked && !specActive ? " • spec:off(deadlock)" : "");
     setStatus("Ready");
-    logLine("app", "Model ready:", model.label);
+    logLine("app", "Model ready:", model.label, specActive ? "(with draft)" : "(solo)");
     inputEl.disabled = false;
     sendEl.disabled = false;
     inputEl.focus();
@@ -502,7 +578,7 @@ async function generateResponse(prompt, replyElement) {
       const piece = chunk.choices?.[0]?.delta?.content ?? "";
       generatedText += piece;
       typeQueue += piece;
-      feedTypingRate(piece); // typewriter paces itself to the live model speed
+      feedTypingRate(piece);
       if (chunk.choices?.[0]?.finish_reason) {
         finishReason = chunk.choices[0].finish_reason;
       }
@@ -517,7 +593,7 @@ async function generateResponse(prompt, replyElement) {
   const truncated = finishReason === "length" ||
     (Number.isFinite(completionTokens) && completionTokens >= N_PREDICT);
 
-  await typeFinish(); // let the remaining letters finish appearing
+  await typeFinish();
 
   const ended = performance.now();
   const firstAt = firstTokenAt ?? ended, lastAt = lastTokenAt ?? ended;
@@ -549,7 +625,7 @@ async function generateResponse(prompt, replyElement) {
   saveConversation();
 
   if (truncated) {
-    const nextLimit = Math.min(N_PREDICT * 2, 2048);
+    const nextLimit = Math.min(N_PREDICT * 2, 3072);
     const notice = document.createElement("div");
     notice.className = "continue-notice";
     notice.style.cssText =
