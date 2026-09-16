@@ -1,4 +1,4 @@
-import * as webllm from "https://esm.run/@mlc-ai/web-llm";
+import * as webllm from "https://esm.run/@mlc-ai/web-llm@0.2.82";
 
 // ============================================================
 // CONFIG
@@ -386,7 +386,7 @@ async function initializeModel() {
             {
 
                 context_window_size:
-                    2048
+                    1024
 
             }
 
