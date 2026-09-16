@@ -1,39 +1,84 @@
-import { env, pipeline, TextStreamer } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1";
+import { Wllama, LoggerWithoutDebug } from "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.6.1/esm/index.js";
+import WasmFromCDN from "https://cdn.jsdelivr.net/npm/@wllama/wllama@3.6.1/esm/wasm-from-cdn.js";
 
 // ================== CONFIG ==================
-const MODEL_ID = "onnx-community/SmolLM2-360M-Instruct-ONNX";
-// Smarter but ~30% slower — swap in if you prefer quality over speed:
-// const MODEL_ID = "onnx-community/Qwen2.5-0.5B-Instruct-ONNX";
+const MODEL_URL =
+  "https://huggingface.co/unsloth/gemma-3-270m-it-GGUF/resolve/main/gemma-3-270m-it-Q4_0.gguf";
+
+const THREADS = 4;        // tune: try 3, 4, 6
+const N_CTX = 2048;
+const N_PREDICT = 256;
+
+const TYPE_MS = 30;       // ms per character — lower = faster typing feel
 
 const COST_TOKEN_PER_1M = 0.20;
 const COST_CPU_HOUR = 0.05;
-const COST_KEY = "smollm2-360m-total-cost-v3";
-const CHAT_KEY = "smollm2-360m-chat-v3";
+const COST_KEY = "gemma-270m-wllama-cost-v1";
+const CHAT_KEY = "gemma-270m-wllama-chat-v1";
 
-// ================== PERFORMANCE FIXES ==================
-env.allowLocalModels = false;
-env.allowRemoteModels = true;
-env.useBrowserCache = true;
-env.useWasmCache = true;
+// ================== TYPEWRITER ==================
+// Letters appear one by one. The model generates at full speed in the
+// background; this loop just paces the *display*. If the model outpaces
+// the animation, it speeds up to catch up, so it never lags behind.
+let typeEl = null;
+let typeQueue = "";
+let typeTimer = null;
+let typeFinished = false;
+let drainResolve = null;
 
-// FIX 1: multi-threaded WASM. Only takes effect when the page is
-// cross-origin isolated — coi-serviceworker.js (loaded in index.html)
-// handles that. Try 2 / 4 / 6 and keep whichever is fastest.
-env.backends.onnx.wasm.numThreads = 4;
+function startTyping(el) {
+  finishTyping(); // reset any previous state
+  typeEl = el;
+  typeQueue = "";
+  typeFinished = false;
+  el.classList.add("typing");
+  typeTimer = setInterval(typeTick, TYPE_MS);
+}
 
-// FIX 2: run inference inside a Web Worker so the page
-// doesn't freeze while generating.
-env.backends.onnx.wasm.proxy = true;
+function typeTick() {
+  if (!typeEl) return;
+  if (!typeQueue.length) {
+    if (typeFinished) finishTyping(); // all shown, generation done
+    return;
+  }
+  // adaptive speed: 1 char/tick normally, more when there's a backlog
+  let chars = 1;
+  if (typeFinished) chars = 4;               // drain fast after generation ends
+  else if (typeQueue.length > 40) chars = 3; // catching up
+  else if (typeQueue.length > 15) chars = 2;
+  typeEl.textContent += typeQueue.slice(0, chars);
+  typeQueue = typeQueue.slice(chars);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
 
-// ================== ELEMENTS ==================
+function finishTyping() {
+  if (typeTimer) { clearInterval(typeTimer); typeTimer = null; }
+  if (typeEl) { typeEl.classList.remove("typing"); typeEl = null; }
+  if (drainResolve) { drainResolve(); drainResolve = null; }
+}
+
+// resolves when generation is done AND all letters have been displayed
+function typeFinish() {
+  typeFinished = true;
+  if (!typeTimer) return Promise.resolve(); // nothing running
+  return new Promise((resolve) => { drainResolve = resolve; });
+}
+
+// hard stop (errors / clear button): drop pending text instantly
+function abortTyping() {
+  typeQueue = "";
+  typeFinished = true;
+  finishTyping();
+}
+
+// ================== ELEMENTS / STATE ==================
 const $ = (id) => document.getElementById(id);
 const statusEl = $("status"), loadbarEl = $("loadbar"), loadfillEl = $("loadfill");
 const backendEl = $("backend"), ramEl = $("ram"), storageEl = $("storage");
 const speedEl = $("speed"), costEl = $("cost"), chatEl = $("chat");
 const formEl = $("form"), inputEl = $("input"), sendEl = $("send"), clearEl = $("clear");
 
-// ================== STATE ==================
-let generator = null;
+let wllama = null;
 let conversation = [];
 let generating = false;
 let totalCost = Number(localStorage.getItem(COST_KEY) || "0");
@@ -89,37 +134,27 @@ function restoreConversation() {
   } catch (e) { console.warn("Could not restore chat:", e); }
 }
 
-// ================== TOKEN COUNTING ==================
-function estimateTokens(text) {
-  const words = String(text).trim().split(/\s+/).filter(Boolean).length;
-  return Math.max(1, Math.ceil(words * 1.3));
-}
-function countTokens(text) {
-  // real token count from the tokenizer, with a safe fallback
-  try { return generator.tokenizer(text).input_ids.dims[1] || estimateTokens(text); }
-  catch { return estimateTokens(text); }
-}
-
 // ================== MODEL ==================
 async function initializeModel() {
   const isolated = typeof crossOriginIsolated !== "undefined" && crossOriginIsolated;
   backendEl.textContent = isolated
-    ? `WASM/CPU • ${env.backends.onnx.wasm.numThreads} threads`
-    : "WASM/CPU • 1 thread (isolation FAILED)";
-  setStatus("Loading SmolLM2 360M…");
+    ? `wllama (llama.cpp) • ${THREADS} threads`
+    : "wllama • 1 thread (isolation FAILED — check coi-serviceworker.js!)";
+
+  setStatus("Loading Gemma 3 270M (Q4_0, 242 MB)…");
   setProgress(0);
-  const progressCallback = (info) => {
-    if (info?.status) setStatus(String(info.status));
-    else if (info?.file) setStatus(`Loading ${info.file}…`);
-    const p = Number(info?.progress);
-    if (Number.isFinite(p)) setProgress(p);
-  };
-  // dtype "q4" — NOT q4f16, which hits a float16 WASM error on this setup
-  generator = await pipeline("text-generation", MODEL_ID, {
-    dtype: "q4",
-    device: "wasm",
-    progress_callback: progressCallback,
+
+  wllama = new Wllama(WasmFromCDN, { logger: LoggerWithoutDebug });
+
+  await wllama.loadModelFromUrl(MODEL_URL, {
+    n_ctx: N_CTX,
+    n_threads: THREADS,
+    progressCallback: ({ loaded, total }) => {
+      setProgress((loaded / total) * 100);
+      setStatus(`Downloading… ${Math.round((loaded / total) * 100)}%`);
+    },
   });
+
   hideProgress();
   setStatus("Ready");
   inputEl.disabled = false;
@@ -133,51 +168,50 @@ async function initializeModel() {
 // ================== GENERATION ==================
 async function generateResponse(prompt, replyElement) {
   const messages = [
-    { role: "system", content:
-        "You are SmolLM2 360M, a small AI assistant running locally in the user's browser. " +
-        "Do not claim to be another model or company. Answer directly and accurately. " +
-        "For calculations, show your work." },
-    ...conversation.slice(-6), // shorter history = much faster prefill on this chip
+    { role: "system", content: "You are a helpful local assistant running in the browser." },
+    ...conversation.slice(-6),
     { role: "user", content: prompt },
   ];
 
   const started = performance.now();
   let firstTokenAt = null, lastTokenAt = null, generatedText = "";
 
-  const streamer = new TextStreamer(generator.tokenizer, {
-    skip_prompt: true,
-    callback_function: (text) => {
+  startTyping(replyElement);
+
+  await wllama.createChatCompletion({
+    messages,
+    max_tokens: N_PREDICT,
+    temperature: 1.0,
+    top_k: 64,
+    top_p: 0.95,
+    stream: true,
+    onData: (chunk) => {
       const now = performance.now();
-      if (firstTokenAt === null) firstTokenAt = now; // FIX 3: timer starts at first token
+      if (firstTokenAt === null) firstTokenAt = now;
       lastTokenAt = now;
-      generatedText += text;
-      replyElement.textContent = generatedText;
-      chatEl.scrollTop = chatEl.scrollHeight;
+      const piece = chunk.choices?.[0]?.delta?.content ?? "";
+      generatedText += piece;
+      typeQueue += piece; // animation loop picks it up
     },
   });
 
-  await generator(messages, {
-    max_new_tokens: 256, // lower = snappier; raise for longer answers
-    do_sample: true,
-    temperature: 0.7,
-    streamer,
-  });
+  await typeFinish(); // let the remaining letters finish appearing
 
   const ended = performance.now();
   const firstAt = firstTokenAt ?? ended, lastAt = lastTokenAt ?? ended;
   const prefillSeconds = Math.max((firstAt - started) / 1000, 0.001);
   const genSeconds = Math.max((lastAt - firstAt) / 1000, 0.001);
 
-  const outputTokens = countTokens(generatedText);
-  const inputTokens = messages.reduce((t, m) => t + estimateTokens(m.content), 0);
-  const totalTokens = inputTokens + outputTokens;
+  // NOTE: speed is measured from real token arrival times, so the
+  // typewriter animation never pollutes the tok/s number
+  const outputTokens = Math.max(1, Math.round(generatedText.length / 4));
   const tokensPerSecond = outputTokens / genSeconds;
 
   speedEl.textContent =
     `${outputTokens} tok • ${tokensPerSecond.toFixed(1)} tok/s • prefill ${prefillSeconds.toFixed(1)}s`;
 
   const requestCost =
-    (totalTokens / 1_000_000) * COST_TOKEN_PER_1M +
+    (outputTokens / 1_000_000) * COST_TOKEN_PER_1M +
     ((prefillSeconds + genSeconds) / 3600) * COST_CPU_HOUR;
   totalCost += requestCost;
   localStorage.setItem(COST_KEY, String(totalCost));
@@ -197,7 +231,7 @@ async function sendMessage() {
   if (generating) return;
   const prompt = inputEl.value.trim();
   if (!prompt) return;
-  if (!generator) { setStatus("Model is still loading…"); return; }
+  if (!wllama) { setStatus("Model is still loading…"); return; }
   generating = true;
   inputEl.value = "";
   inputEl.disabled = true;
@@ -210,6 +244,7 @@ async function sendMessage() {
     setStatus("Ready");
   } catch (error) {
     console.error("Generation error:", error);
+    abortTyping(); // stop animation before overwriting with the error
     replyElement.textContent = `Error: ${error?.message || error}`;
     setStatus("Generation failed");
   } finally {
@@ -226,6 +261,7 @@ inputEl.addEventListener("keydown", (e) => {
 });
 formEl.addEventListener("submit", (e) => { e.preventDefault(); sendMessage(); });
 clearEl.addEventListener("click", () => {
+  abortTyping();
   conversation = [];
   localStorage.removeItem(CHAT_KEY);
   chatEl.replaceChildren();
@@ -233,10 +269,7 @@ clearEl.addEventListener("click", () => {
 setInterval(() => { updateMemory(); updateStorage(); }, 1500);
 
 // ================== STARTUP ==================
-// NOTE: no more custom sw.js registration — coi-serviceworker.js needs the
-// service-worker slot (only one per scope), and transformers.js already
-// caches the model itself via env.useBrowserCache.
-async function main() {
+(async () => {
   try {
     restoreConversation();
     updateCost();
@@ -247,5 +280,4 @@ async function main() {
     console.error("STARTUP ERROR:", error);
     setStatus(`Startup error: ${error?.message || error}`);
   }
-}
-main();
+})();

@@ -24,6 +24,8 @@
   button { padding: 0 16px; border-radius: 8px; border: none; background: #4f8cff; color: #fff; font: inherit; cursor: pointer; }
   button:disabled { opacity: .4; cursor: default; }
   #clear { background: #333a47; }
+  .msg.assistant.typing::after { content: "▌"; animation: cursor-blink 0.9s steps(1) infinite; }
+@keyframes cursor-blink { 50% { opacity: 0; } }
 </style>
 </head>
 <body>
@@ -51,6 +53,6 @@
     <button id="clear" type="button">Clear</button>
   </form>
 
-  <script type="module" src="app.js?v=41289241848224"></script>
+  <script type="module" src="app.js?v=412892418348224"></script>
 </body>
 </html>
