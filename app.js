@@ -6,12 +6,10 @@ const CONFIG_PATHS = {
 };
 
 // ================== TOGGLES ==================
-// Speculative decoding: DOES NOT WORK on this WASM build. The pthread pool
-// (fixed at 4 workers) cannot host two contexts — the draft context's
-// compute threads deadlock the pool and loading hangs forever. Confirmed
-// via log 17:03:53: draft loads fully, then native code never returns.
-// Do not enable. — final verdict, 2026
-const ENABLE_SPEC_DECODING = false;
+// Speculative decoding: DOES NOT WORK on this WASM build — the fixed 4-worker
+// pthread pool deadlocks when the draft context requests compute threads.
+// Confirmed via log; do not enable.
+const ENABLE_SPEC_DECODING = true;
 
 // ================== MODELS ==================
 const MODELS = {
@@ -51,12 +49,116 @@ if (!MODELS[currentModelKey]) currentModelKey = "gemma-1b";
 // ================== CONFIG ==================
 let N_PREDICT = 512;
 
-const TYPE_BASE_CPS = 28;
-
 const COST_TOKEN_PER_1M = 0.20;
 const COST_CPU_HOUR = 0.05;
 const COST_KEY = "gemma-270m-wllama-cost-v1";
 const CHAT_KEY = "gemma-270m-wllama-chat-v1";
+
+// ================== TYPEWRITER ==================
+// Typing speed tracks the model's LIVE output rate (measured as tokens
+// arrive), so fast models type fast and slow models type at reading pace —
+// but hard caps guarantee it's always visibly character-by-character.
+// Tune these:
+const TYPE_BASE_CPS = 40;    // floor: minimum chars/sec (reading speed)
+const TYPE_MAX_CPS = 150;    // cap while generating (≈2 chars/frame at 60fps)
+const TYPE_DRAIN_MAX = 200;  // cap when draining after generation ends
+
+let typeEl = null;
+let typeQueue = "";
+let typeFinished = false;
+let typeRaf = null;
+let typeLastTs = 0;
+let typeSpeed = TYPE_BASE_CPS;
+let typeAccum = 0;
+let drainResolve = null;
+let inRate = 0;      // smoothed live incoming chars/sec from the model
+let lastInTs = 0;
+
+function startTyping(el) {
+  finishTyping();
+  typeEl = el;
+  typeQueue = "";
+  typeFinished = false;
+  typeSpeed = TYPE_BASE_CPS;
+  typeAccum = 0;
+  inRate = 0;
+  lastInTs = 0;
+  el.classList.add("typing");
+  typeLastTs = performance.now();
+  typeRaf = requestAnimationFrame(typeFrame);
+}
+
+// call from onData — keeps a smoothed estimate of how fast the model writes
+function feedTypingRate(piece) {
+  const now = performance.now();
+  if (lastInTs && piece) {
+    const dt = (now - lastInTs) / 1000;
+    if (dt > 0 && dt < 1) {
+      const inst = piece.length / dt;
+      inRate = inRate ? inRate * 0.75 + inst * 0.25 : inst;
+    }
+  }
+  lastInTs = now;
+}
+
+function typeFrame(ts) {
+  if (!typeEl) return;
+  const dt = Math.min((ts - typeLastTs) / 1000, 0.1);
+  typeLastTs = ts;
+
+  // don't bank speed while there's nothing to type
+  if (!typeQueue.length && !typeFinished) {
+    typeAccum = 0;
+  }
+
+  let target;
+  if (typeFinished) {
+    // generation done: drain the rest briskly but visibly
+    // (a full essay drains in ~5–10s, never instantly)
+    target = Math.min(TYPE_DRAIN_MAX, Math.max(90, typeQueue.length / 5));
+  } else {
+    // pace with the model's live rate + gentle catch-up on backlog,
+    // hard-capped so it always looks like typing
+    target = Math.min(
+      TYPE_MAX_CPS,
+      TYPE_BASE_CPS + inRate * 0.9 + typeQueue.length * 1.5
+    );
+  }
+
+  // smooth acceleration toward the target (no jumps)
+  typeSpeed += (target - typeSpeed) * Math.min(1, dt * 6);
+
+  typeAccum += typeSpeed * dt;
+  const n = Math.floor(typeAccum);
+  if (n > 0 && typeQueue.length) {
+    const take = Math.min(n, typeQueue.length);
+    typeEl.textContent += typeQueue.slice(0, take);
+    typeQueue = typeQueue.slice(take);
+    typeAccum -= take;
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
+  if (typeFinished && !typeQueue.length) { finishTyping(); return; }
+  typeRaf = requestAnimationFrame(typeFrame);
+}
+
+function finishTyping() {
+  if (typeRaf) { cancelAnimationFrame(typeRaf); typeRaf = null; }
+  if (typeEl) { typeEl.classList.remove("typing"); typeEl = null; }
+  if (drainResolve) { drainResolve(); drainResolve = null; }
+}
+
+function typeFinish() {
+  typeFinished = true;
+  if (!typeRaf) return Promise.resolve();
+  return new Promise((resolve) => { drainResolve = resolve; });
+}
+
+function abortTyping() {
+  typeQueue = "";
+  typeFinished = true;
+  finishTyping();
+}
 
 // ================== ON-PAGE LOG ==================
 const LOG_KEY = "wllama-log-v1";
@@ -162,73 +264,6 @@ function makeLogger() {
     try { console[level]?.(...args); } catch {}
   };
   return { debug: wrap("debug"), log: wrap("log"), warn: wrap("warn"), error: wrap("error") };
-}
-
-// ================== TYPEWRITER ==================
-let typeEl = null;
-let typeQueue = "";
-let typeFinished = false;
-let typeRaf = null;
-let typeLastTs = 0;
-let typeSpeed = TYPE_BASE_CPS;
-let typeAccum = 0;
-let drainResolve = null;
-
-function startTyping(el) {
-  finishTyping();
-  typeEl = el;
-  typeQueue = "";
-  typeFinished = false;
-  typeSpeed = TYPE_BASE_CPS;
-  typeAccum = 0;
-  el.classList.add("typing");
-  typeLastTs = performance.now();
-  typeRaf = requestAnimationFrame(typeFrame);
-}
-
-function typeFrame(ts) {
-  if (!typeEl) return;
-  const dt = Math.min((ts - typeLastTs) / 1000, 0.1);
-  typeLastTs = ts;
-
-  let target;
-  if (typeFinished) target = Math.max(80, typeQueue.length * 2);
-  else if (typeQueue.length > 80) target = typeQueue.length * 0.9;
-  else if (typeQueue.length > 30) target = 55;
-  else target = TYPE_BASE_CPS;
-
-  typeSpeed += (target - typeSpeed) * Math.min(1, dt * 4);
-
-  typeAccum += typeSpeed * dt;
-  const n = Math.floor(typeAccum);
-  if (n > 0 && typeQueue.length) {
-    const take = Math.min(n, typeQueue.length);
-    typeEl.textContent += typeQueue.slice(0, take);
-    typeQueue = typeQueue.slice(take);
-    typeAccum -= take;
-    chatEl.scrollTop = chatEl.scrollHeight;
-  }
-
-  if (typeFinished && !typeQueue.length) { finishTyping(); return; }
-  typeRaf = requestAnimationFrame(typeFrame);
-}
-
-function finishTyping() {
-  if (typeRaf) { cancelAnimationFrame(typeRaf); typeRaf = null; }
-  if (typeEl) { typeEl.classList.remove("typing"); typeEl = null; }
-  if (drainResolve) { drainResolve(); drainResolve = null; }
-}
-
-function typeFinish() {
-  typeFinished = true;
-  if (!typeRaf) return Promise.resolve();
-  return new Promise((resolve) => { drainResolve = resolve; });
-}
-
-function abortTyping() {
-  typeQueue = "";
-  typeFinished = true;
-  finishTyping();
 }
 
 // ================== ELEMENTS / STATE ==================
@@ -397,20 +432,19 @@ async function loadCurrentModel() {
     setProgress(0);
     wllama = getWllama();
 
-    const loadParams = {
+    await wllama.loadModelFromUrl(model.url, {
       n_ctx: model.n_ctx,
-      n_threads: model.threads,
       n_gpu_layers: 0,       // CPU/WASM only — skips WebGPU init entirely
       n_batch: 2048,          // prefill batching
       n_ubatch: 512,
+	  n_threads: 2,
+	  spec_draft_model: "models/model-00002-of-00002.gguf",
+	  spec_draft_threads: 1,
+	  spec_draft_threads_batch: 1,
       flash_attn: true,       // faster attention; required for quantized KV cache
       cache_type_k: model.cache_k,
       cache_type_v: model.cache_v,
       ctx_shift: true,
-    };
-
-    await wllama.loadModelFromUrl(model.url, {
-      ...loadParams,
       progressCallback: ({ loaded, total }) => {
         setProgress((loaded / total) * 100);
         setStatus(`Downloading ${model.label}… ${Math.round((loaded / total) * 100)}%`);
@@ -468,6 +502,7 @@ async function generateResponse(prompt, replyElement) {
       const piece = chunk.choices?.[0]?.delta?.content ?? "";
       generatedText += piece;
       typeQueue += piece;
+      feedTypingRate(piece); // typewriter paces itself to the live model speed
       if (chunk.choices?.[0]?.finish_reason) {
         finishReason = chunk.choices[0].finish_reason;
       }
@@ -482,7 +517,7 @@ async function generateResponse(prompt, replyElement) {
   const truncated = finishReason === "length" ||
     (Number.isFinite(completionTokens) && completionTokens >= N_PREDICT);
 
-  await typeFinish();
+  await typeFinish(); // let the remaining letters finish appearing
 
   const ended = performance.now();
   const firstAt = firstTokenAt ?? ended, lastAt = lastTokenAt ?? ended;
